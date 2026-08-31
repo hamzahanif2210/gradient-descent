@@ -81,6 +81,11 @@ const eraInfo = e => ERAS[Math.min(e - 1, 7)];
 const eraBase = e => Math.round(150 * Math.pow(2, e - 1));
 const eraData = e => Math.round(6000 * Math.pow(1.7, e - 1));
 const ROUNDS = ["Training Round", "Validation Round", "Boss Benchmark"];
+const ROUND_BRIEFING = [
+  "Practice runs — build freely, no overfitting penalty here.",
+  "Now Generalization counts — bigger isn't always better.",
+  "A special rule is in play this round — read it below.",
+];
 
 /* ---------- combos (architectures you can build) ---------- */
 const PATTERNS = [
@@ -306,6 +311,54 @@ function scoreHand(stack, ctx) {
   return { pat, lvl, patSig, patGain, cardSigs, totalSig, gain, gen, genExpr, params, score, notes, depthApplied, dropIdx };
 }
 
+/* ---------- item 3: "what would the optimal solution have been?" ---------- */
+/* Fixed type-recipes (mirrors matchPattern) we can try to greedily assemble from a hand. "act" means any activation type. */
+const OPTIMAL_RECIPES = [
+  ["transformer", ["q", "k", "softmax", "v", "norm", "dense", "act"]],
+  ["attn", ["q", "k", "softmax", "v"]],
+  ["lstm", ["gatef", "gatei", "gateo", "gatec", "recur"]],
+  ["recloop", ["embed", "recur", "dense"]],
+  ["featext", ["conv", "act", "pool"]],
+  ["normblock", ["dense", "norm", "act"]],
+  ["residual", ["dense", "dense", "skip"]],
+  ["mlp", ["dense", "act"]],
+  ["linear", ["dense", "dense", "dense"]],
+];
+function greedyBuild(seq, pool) {
+  const used = new Set(); const stack = [];
+  for (const need of seq) {
+    const cand = pool
+      .filter(c => !used.has(c.id) && (need === "act" ? isAct(c.type) : c.type === need))
+      .sort((a, b) => b.width - a.width)[0];
+    if (!cand) return null;
+    used.add(cand.id); stack.push(cand);
+  }
+  return stack;
+}
+/* Explores the hand for the best-scoring achievable network given the round's context. Offered, never forced. */
+function computeOptimal(g) {
+  const pool = g.hand.map(id => g.deck.find(c => c.id === id)).filter(Boolean);
+  const kind = g.blindIdx === 0 ? "train" : g.blindIdx === 1 ? "val" : "boss";
+  const ctx = {
+    kind, papers: new Set(g.papers), levels: g.levels, suits: eraInfo(g.era).suits,
+    data: g.data, boss: g.boss, bossSuit: g.bossSuit, capVal: g.capVal,
+    streak: { pat: null, count: 0 }, handIndex: g.handIndex, adamBonus: g.adamBonus, seed: g.seedStr + g.era + g.blindIdx + "-opt",
+  };
+  let best = null;
+  for (const [, seq] of OPTIMAL_RECIPES) {
+    const stack = greedyBuild(seq, pool);
+    if (!stack) continue;
+    const res = scoreHand(stack, ctx);
+    if (!best || res.score > best.res.score) best = { stack, res };
+  }
+  if (!best) {
+    /* fall back to the single strongest card in hand */
+    const c = [...pool].sort((a, b) => b.width - a.width)[0];
+    if (c) best = { stack: [c], res: scoreHand([c], ctx) };
+  }
+  return best;
+}
+
 /* ---------- pop quiz (small real matrix math, pays compute) ---------- */
 function makeDerive(g) {
   const r = mulberry32(hashStr(g.seedStr + "-quiz-" + g.era + "-" + g.blindIdx));
@@ -346,7 +399,7 @@ function startBlind(g) {
   g.data = eraData(g.era);
   g.cleared = false; g.failed = false;
   g.lastResult = null;
-  g.boss = null; g.bossSuit = null; g.capVal = 0;
+  g.boss = null; g.bossSuit = null; g.capVal = 0; g.gpuOverkill = false;
   if (g.blindIdx === 2) {
     const unused = BOSSES.filter(b => !g.bossesSeen.includes(b.id));
     g.boss = pick(r, unused.length ? unused : BOSSES);
@@ -410,6 +463,8 @@ export default function GradientDescent() {
   const [tut, setTut] = useState(null);
   const [seenTut, setSeenTut] = useState(false);
   const [dragOver, setDragOver] = useState(null);
+  const [discSel, setDiscSel] = useState(() => new Set());
+  const [hoverCard, setHoverCard] = useState(null); /* {card, x, y} for the Pokémon-card-style tooltip */
 
   const gRef = useRef(null); gRef.current = g;
   const fastRef = useRef(false); fastRef.current = fast;
@@ -530,6 +585,9 @@ export default function GradientDescent() {
       g2.handIndex += 1;
       g2.streak = res.pat.id === gg.streak.pat ? { pat: res.pat.id, count: gg.streak.count + 1 } : { pat: res.pat.id, count: 0 };
       g2.lastResult = res;
+      /* item 8: GPU-overkill tracking — a High-compute network used on a "simple" (Training) round */
+      const gpuTier = res.params < 1000 ? "Low" : res.params < 10000 ? "Medium" : "High";
+      if (gpuTier === "High" && g2.blindIdx === 0) g2.gpuOverkill = true;
       if (!g2.bestHand || res.score > g2.bestHand.score) g2.bestHand = { pat: res.pat.name, score: res.score, params: res.params, arch: stackCards.map(c => TYPES[c.type].name + "×" + c.width).join(" → ") };
       /* discard played cards, draw back to 8 */
       const played = new Set(g2.stack);
@@ -593,6 +651,43 @@ export default function GradientDescent() {
       g2.drawPile = drawPile;
       return g2;
     });
+  }
+
+  /* ---------- discard-via-selection (replaces the old per-card cross) ---------- */
+  function toggleDiscard(id) {
+    setDiscSel(s => {
+      const gg = gRef.current;
+      const n = new Set(s);
+      if (n.has(id)) { n.delete(id); return n; }
+      if (gg && gg.ablations <= 0) { say("No redraws left this round."); return n; }
+      n.add(id);
+      return n;
+    });
+  }
+  function doDiscard() {
+    const gg = gRef.current;
+    if (!gg || busyRef.current || gg.cleared || gg.ablations <= 0 || discSel.size === 0) return;
+    const away = new Set([...discSel].filter(id => gg.hand.includes(id)));
+    if (!away.size) { setDiscSel(new Set()); return; }
+    setG(g0 => {
+      let g2 = { ...g0 };
+      g2.discard = [...g2.discard, ...away];
+      g2.hand = g2.hand.filter(id => !away.has(id));
+      g2.stack = g2.stack.filter(id => !away.has(id));
+      g2.ablations -= 1;
+      let drawPile = [...g2.drawPile];
+      while (g2.hand.length < 8) {
+        if (!drawPile.length) {
+          if (!g2.discard.length) break;
+          const r = mulberry32(hashStr(g2.seedStr + "-reshD-" + g2.ablations + "-" + g2.handIndex));
+          drawPile = shuffle(r, g2.discard); g2.discard = [];
+        }
+        g2.hand = [...g2.hand, drawPile.shift()];
+      }
+      g2.drawPile = drawPile;
+      return g2;
+    });
+    setDiscSel(new Set());
   }
 
   /* ---------- flow: shop, next round, quiz, legendary ---------- */
@@ -742,6 +837,16 @@ export default function GradientDescent() {
           <button className="gd-play alt" onClick={() => { setTut(0); }}>How to play</button>
         </div>
         <div className="gd-howto">8 eras of AI history · 3 rounds each · same seed = same game</div>
+        <div className="gd-howwin">
+          <div className="gd-howwinHead">▸ How to win</div>
+          <ul className="gd-howwinList">
+            <li>Build a network by clicking layer cards into an order — data flows left → right.</li>
+            <li>Hit each round's <b>target score</b> before your <b>4 Training Runs</b> run out.</li>
+            <li>SCORE = Signal × Gain × Generalization — known combos (Combos button) score way more than random stacks.</li>
+            <li>From Validation rounds on, Generalization = Data ÷ Parameters — a huge network can tank your score. Bigger isn't always better!</li>
+            <li>Spend ⚡ compute at the Expo between rounds on real research papers, cards and Tune-Ups.</li>
+          </ul>
+        </div>
       </div>
       {tut !== null && <Tutorial step={tut} setStep={setTut} />}
     </div>
@@ -752,14 +857,30 @@ export default function GradientDescent() {
     return (
       <div className="gd-root gd-center"><style>{css()}</style>
         <div className="gd-menu">
-          <div className="gd-eyebrow">{won ? "benchmark saturated" : "training diverged"}</div>
-          <h1 className="gd-title" style={{ fontSize: 44 }}>{won ? "STATE OF THE ART" : "OUT OF RUNS"}</h1>
-          <p className="gd-sub">{won ? "All 8 eras cleared — your little lab made history." : `Era ${g.era}, ${ROUNDS[Math.min(g.blindIdx, 2)]}: needed ${fmt(g.target)}, reached ${fmt(g.progress)}.`}</p>
+          <div className="gd-eyebrow">{won ? "benchmark saturated" : g.gpuOverkill ? "your professor is disheartened" : "training diverged"}</div>
+          <h1 className="gd-title" style={{ fontSize: 44 }}>{won ? "STATE OF THE ART" : g.gpuOverkill ? "OVERKILL" : "OUT OF RUNS"}</h1>
+          <p className="gd-sub">{won
+            ? "All 8 eras cleared — your little lab made history."
+            : g.gpuOverkill
+              ? `You threw a High-compute network at a simple ${ROUNDS[Math.min(g.blindIdx, 2)].toLowerCase()} and still fell short — Era ${g.era}: needed ${fmt(g.target)}, reached ${fmt(g.progress)}. A lean, well-matched network would have done better with far less GPU compute.`
+              : `Era ${g.era}, ${ROUNDS[Math.min(g.blindIdx, 2)]}: needed ${fmt(g.target)}, reached ${fmt(g.progress)}.`}</p>
           {g.bestHand && <div className="gd-abstract">
             <div className="gd-absHead">YOUR BEST NETWORK</div>
             <p><b>{g.bestHand.pat}</b> — {g.bestHand.arch}<br />{fmt(g.bestHand.params)} parameters · scored <b>{fmt(g.bestHand.score)}</b></p>
           </div>}
           <p className="gd-tiny" style={{ margin: "6px 0 14px" }}>Notebook entries discovered: {g.notebookUnlocked.length}/{NOTEBOOK.length} · seed {g.seedStr}</p>
+          {!won && (
+            modal && modal.type === "optimal" ? (
+              <div className="gd-abstract" style={{ textAlign: "left" }}>
+                <div className="gd-absHead">OPTIMAL SOLUTION FROM THAT HAND</div>
+                {modal.opt ? (
+                  <p><b>{modal.opt.res.pat.name}</b> — {modal.opt.stack.map(c => TYPES[c.type].name + "×" + c.width).join(" → ")}<br />would have scored <b>{fmt(modal.opt.res.score)}</b> (Signal {fmt(modal.opt.res.totalSig)} × Gain {modal.opt.res.gain} × Gen {modal.opt.res.gen})</p>
+                ) : <p>No stronger combo was buildable from that hand.</p>}
+              </div>
+            ) : (
+              <button className="gd-play alt" style={{ marginBottom: 8 }} onClick={() => setModal({ type: "optimal", opt: computeOptimal(g) })}>View optimal solution</button>
+            )
+          )}
           <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
             {won && <button className="gd-play" onClick={startEndless}>Endless mode →</button>}
             <button className="gd-play alt" onClick={() => { setSeedInput(g.seedStr); setScreen("menu"); }}>Retry same seed</button>
@@ -800,6 +921,7 @@ export default function GradientDescent() {
       </div>
       <div className="gd-progressWrap">
         <div className="gd-progressLabel"><b>{ROUNDS[Math.min(g.blindIdx, 2)]}</b> · {fmt(g.progress)} / {fmt(g.target)} target</div>
+        <div className="gd-briefing">{ROUND_BRIEFING[Math.min(g.blindIdx, 2)]}</div>
         <div className="gd-bar"><div className="gd-barFill" style={{ width: Math.min(100, 100 * g.progress / g.target) + "%" }} /></div>
       </div>
       <div className="gd-meta">
@@ -851,7 +973,6 @@ export default function GradientDescent() {
                   <div className="gd-dots">{Array.from({ length: Math.min(6, Math.max(2, Math.round(lg2(c.width)))) }).map((_, j) => <span key={j} className="gd-dot" style={{ background: SUITS[c.suit].color }} />)}</div>
                   <div className="gd-layerW">×{c.width}</div>
                   {fired && sigInfo && <div className={"gd-sigPop" + (sigInfo.sig === 0 ? " zero" : "")}>{sigInfo.sig === 0 ? (sigInfo.note || "0") : "+" + sigInfo.sig}</div>}
-                  {!anim && !g.cleared && <button className="gd-x" onClick={() => removeCard(c.id)} title="remove">✕</button>}
                 </div>
               ) : (
                 <div
@@ -885,6 +1006,7 @@ export default function GradientDescent() {
       <div className="gd-actions">
         <button className="gd-play" disabled={!n || g.epochs <= 0 || !!anim || g.cleared} onClick={playHand}>▶ Run the network <span className="gd-tiny2">({g.epochs} left)</span></button>
         <button className="gd-play alt" disabled={!n || g.ablations <= 0 || !!anim || g.cleared} onClick={redraw}>Return &amp; redraw <span className="gd-tiny2">({g.ablations} left)</span></button>
+        <button className="gd-discardBtn" disabled={discSel.size === 0 || g.ablations <= 0 || !!anim || g.cleared} onClick={doDiscard}>🗑 Discard selected <span className="gd-tiny2">({discSel.size} marked · {g.ablations} left)</span></button>
       </div>
     </div>
   );
@@ -896,27 +1018,54 @@ export default function GradientDescent() {
         {g.hand.map((id, i) => {
           const c = cardById(g, id); if (!c) return null;
           const inStack = g.stack.includes(id);
+          const marked = discSel.has(id);
           return (
             <div key={id}
-              className={"gd-card" + (inStack ? " sel" : "")}
+              className={"gd-card" + (inStack ? " sel" : "") + (marked ? " gd-discardSel" : "")}
               style={inStack ? { borderColor: SUITS[c.suit].color } : undefined}
               draggable={!inStack && !busyRef.current}
               onDragStart={e => onDragStartHand(e, id)}
               onClick={() => toggleCard(id)}
+              onMouseEnter={e => setHoverCard({ card: c, x: e.clientX, y: e.clientY })}
+              onMouseMove={e => setHoverCard(h => h ? { ...h, x: e.clientX, y: e.clientY } : h)}
+              onMouseLeave={() => setHoverCard(null)}
               role="button" tabIndex={0}
               onKeyDown={e => e.key === "Enter" && toggleCard(id)}
               title={TYPES[c.type].tip}
             >
               <div className="gd-cardKey">{i + 1}</div>
               {inStack && <div className="gd-ordBadge" style={{ background: SUITS[c.suit].color }}>{g.stack.indexOf(id) + 1}</div>}
+              <button
+                className="gd-discardMark"
+                title={marked ? "unmark for discard" : "mark for discard"}
+                onClick={e => { e.stopPropagation(); toggleDiscard(id); }}
+              >{marked ? "✓" : "✕"}</button>
               <div className="gd-cbTop" style={{ background: SUITS[c.suit].bg, color: SUITS[c.suit].color }}><span className="gd-suitI"><SuitIcon suit={c.suit} size={13} /></span><span className="gd-cbW">×{c.width}</span></div>
-              <div className="gd-cbGlyph"><LayerGlyph type={c.type} size={24} /></div>
+              <div className="gd-cbGlyph"><LayerGlyph type={c.type} size={30} /></div>
               <div className="gd-cbName">{TYPES[c.type].name}</div>
               <div className="gd-cbSig">{wSig(c.width)} signal</div>
             </div>
           );
         })}
       </div>
+    </div>
+  );
+
+  /* item 8: GPU Compute / risk indicator, shown below the hand ("deck-side") panel */
+  const stackParams = (() => {
+    const w = stackCards.map(c => c.width);
+    if (!w.length) return 0;
+    if (w.length === 1) return w[0] * w[0];
+    let p = 0; for (let i = 0; i < w.length - 1; i++) p += w[i] * w[i + 1];
+    return p;
+  })();
+  const gpuTier = stackParams < 1000 ? "Low" : stackParams < 10000 ? "Medium" : "High";
+  const gpuColor = gpuTier === "Low" ? "#0f766e" : gpuTier === "Medium" ? "#b45309" : "#b3261e";
+  const gpuPanel = (
+    <div className={"gd-gpu" + (gpuTier === "High" && g.blindIdx === 0 ? " gd-gpuOverkill" : "")}>
+      <span className="gd-gpuDot" style={{ background: gpuColor }} />
+      <span>GPU Compute: <b style={{ color: gpuColor }}>{gpuTier}</b> <span className="gd-tiny">({fmt(stackParams)} est. params)</span></span>
+      {gpuTier === "High" && g.blindIdx === 0 && <span className="gd-tiny" style={{ color: "#b3261e" }}>— a lot of compute for a simple Training round; watch for overkill</span>}
     </div>
   );
 
@@ -933,6 +1082,9 @@ export default function GradientDescent() {
       <div className="gd-eyebrow">round cleared</div>
       <h2 className="gd-h2">{ROUNDS[Math.min(g.blindIdx, 2)]} ✓</h2>
       <p>Scored {fmt(g.progress)} / {fmt(g.target)}.<br />Payout: <b>+{g.reward}⚡ compute</b> {g.rewardNote && <em className="gd-tiny">({g.rewardNote})</em>}</p>
+      {g.blindIdx === 1 && (
+        <button className="gd-play alt" style={{ marginBottom: 10 }} onClick={() => setModal({ type: "optimal", opt: computeOptimal(g) })}>View optimal solution</button>
+      )}
       <button className="gd-play" onClick={proceedToShop}>Go to the Expo →</button>
     </div></div>
   );
@@ -968,9 +1120,13 @@ export default function GradientDescent() {
             {shop.cards.length === 0 && <div className="gd-dim">Sold out.</div>}
             {shop.cards.map((it, i) => (
               <div key={i} className="gd-shopCardRow">
-                <div className="gd-card static" style={{ borderColor: SUITS[it.suit].color }}>
+                <div className="gd-card static" style={{ borderColor: SUITS[it.suit].color }}
+                  onMouseEnter={e => setHoverCard({ card: it, x: e.clientX, y: e.clientY })}
+                  onMouseMove={e => setHoverCard(h => h ? { ...h, x: e.clientX, y: e.clientY } : h)}
+                  onMouseLeave={() => setHoverCard(null)}
+                >
                   <div className="gd-cbTop" style={{ background: SUITS[it.suit].bg, color: SUITS[it.suit].color }}><span className="gd-suitI"><SuitIcon suit={it.suit} size={13} /></span><span className="gd-cbW">×{it.width}</span></div>
-                  <div className="gd-cbGlyph"><LayerGlyph type={it.type} size={24} /></div>
+                  <div className="gd-cbGlyph"><LayerGlyph type={it.type} size={30} /></div>
                   <div className="gd-cbName">{TYPES[it.type].name}</div>
                   <div className="gd-cbSig">{wSig(it.width)} signal</div>
                 </div>
@@ -1010,6 +1166,7 @@ export default function GradientDescent() {
         </div></div>
       )}
       {toast && <div className="gd-toast">{toast}</div>}
+      {hoverCard && <HoverCardTip card={hoverCard.card} x={hoverCard.x} y={hoverCard.y} eraSuits={eraInfo(g.era).suits} />}
     </div>
   );
 
@@ -1021,10 +1178,19 @@ export default function GradientDescent() {
         {scoreStrip}
         {network}
         {handArea}
+        {gpuPanel}
         {papersRow}
       </div>
       {clearedOverlay}
-      {g.failed && <div className="gd-overlay"><div className="gd-modal"><h2 className="gd-h2">Out of Training Runs</h2><p>The target slipped away…</p></div></div>}
+      {g.failed && (
+        <div className="gd-overlay"><div className="gd-modal">
+          {g.gpuOverkill ? (
+            <><h2 className="gd-h2">Your professor is disheartened</h2><p>You threw a High-compute network at a simple problem — and it still wasn't enough. The target slipped away…</p></>
+          ) : (
+            <><h2 className="gd-h2">Out of Training Runs</h2><p>The target slipped away…</p></>
+          )}
+        </div></div>
+      )}
       {modal && modal.type === "combos" && (
         <div className="gd-overlay" onClick={() => setModal(null)}><div className="gd-modal wide" onClick={e => e.stopPropagation()}>
           <h2 className="gd-h2">Combo recipes <span className="gd-tiny">order matters — build these exactly, left to right</span></h2>
@@ -1087,8 +1253,58 @@ export default function GradientDescent() {
           )}
         </div></div>
       )}
+      {modal && modal.type === "optimal" && (
+        <div className="gd-overlay" onClick={() => setModal(null)}><div className="gd-modal" onClick={e => e.stopPropagation()}>
+          <div className="gd-eyebrow">what would the optimal solution have been?</div>
+          <h2 className="gd-h2">Best buildable network from that hand</h2>
+          {modal.opt ? (
+            <p style={{ lineHeight: 1.7 }}>
+              <b>{modal.opt.res.pat.name}</b><br />
+              {modal.opt.stack.map(c => TYPES[c.type].name + "×" + c.width).join(" → ")}<br />
+              Would have scored <b>{fmt(modal.opt.res.score)}</b> (Signal {fmt(modal.opt.res.totalSig)} × Gain {modal.opt.res.gain} × Generalization {modal.opt.res.gen})
+            </p>
+          ) : <p>No stronger combo was buildable from that hand.</p>}
+          <button className="gd-play alt" onClick={() => setModal(null)}>Close</button>
+        </div></div>
+      )}
       {tut !== null && <Tutorial step={tut} setStep={setTut} />}
       {toast && <div className="gd-toast">{toast}</div>}
+      {hoverCard && <HoverCardTip card={hoverCard.card} x={hoverCard.x} y={hoverCard.y} eraSuits={eraInfo(g.era).suits} />}
+    </div>
+  );
+}
+
+/* ---------- card flavor text for the hover tooltip (item 2) ---------- */
+function cardFlavor(type) {
+  if (["conv", "pool"].includes(type)) return "Strong on visual / spatial data.";
+  if (["q", "k", "v", "softmax"].includes(type)) return "Attention part — computationally heavy, scales with sequence length.";
+  if (["recur", "gatef", "gatei", "gateo", "gatec"].includes(type)) return "Sequential memory — reads a sequence one step at a time.";
+  if (isAct(type)) return "Adds nonlinearity — lets the network learn curves, not just straight lines.";
+  if (type === "norm") return "Stabilizes signals so deep stacks stay trainable.";
+  if (type === "skip") return "Shortcut wire — makes going deeper safe.";
+  if (type === "embed") return "Turns discrete items (words) into dense vectors.";
+  if (type === "concat") return "Merges parallel branches into one.";
+  if (type === "dense") return "General-purpose — every input connects to every neuron.";
+  return "";
+}
+
+/* ---------- hover tooltip: Pokémon-card-style info panel ---------- */
+function HoverCardTip({ card, x, y, eraSuits }) {
+  if (!card) return null;
+  const sig = wSig(card.width);
+  const onTopic = eraSuits.includes(card.suit);
+  const effClass = onTopic ? "eff" : "weak";
+  const effLabel = onTopic ? "Effective — full Signal" : "Weak — off-topic, half Signal";
+  const left = Math.min(x + 16, (typeof window !== "undefined" ? window.innerWidth : 1000) - 250);
+  const top = Math.min(y + 16, (typeof window !== "undefined" ? window.innerHeight : 800) - 190);
+  return (
+    <div className="gd-hoverCard" style={{ left, top }}>
+      <div className="gd-hoverTitle"><span><LayerGlyph type={card.type} size={16} /> {TYPES[card.type].name}</span><span className="gd-suitI"><SuitIcon suit={card.suit} size={14} /></span></div>
+      <div className="gd-hoverStat"><span>Width</span><b>×{card.width}</b></div>
+      <div className="gd-hoverStat"><span>Signal (strength)</span><b>{sig}</b></div>
+      <div className={"gd-hoverEff " + effClass}>{effLabel}</div>
+      <div className="gd-hoverTip">{TYPES[card.type].tip}</div>
+      {cardFlavor(card.type) && <div className="gd-hoverFlavor">{cardFlavor(card.type)}</div>}
     </div>
   );
 }
@@ -1154,12 +1370,12 @@ function css() {
   .gd-tiny{font-size:10px;color:#8a8271;font-style:normal;font-weight:400}
   .gd-tiny2{font-size:10px;opacity:.75}
   .gd-dim{color:#8a8271;font-size:11px}
-  .gd-top{display:flex;align-items:center;gap:14px;padding:9px 16px;border-bottom:1.5px solid #2b2a25;background:#fbf7ea;flex-wrap:wrap}
-  .gd-brand{font-family:Georgia,serif;font-weight:700}
-  .gd-topmid{flex:1;color:#57534a;font-size:12px;min-width:200px}
-  .gd-topbtns{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-  .gd-chip{border:1.5px solid #2b2a25;border-radius:20px;background:#fff;padding:3px 10px;font-weight:700}
-  .gd-tbtn{border:1.5px solid #2b2a25;border-radius:6px;background:#fffdf6;padding:5px 10px;font-size:11px}
+  .gd-top{display:flex;align-items:center;gap:18px;padding:14px 22px;border-bottom:2px solid #2b2a25;background:#fbf7ea;flex-wrap:wrap}
+  .gd-brand{font-family:Georgia,serif;font-weight:700;font-size:16px}
+  .gd-topmid{flex:1;color:#57534a;font-size:14px;min-width:200px}
+  .gd-topbtns{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+  .gd-chip{border:1.5px solid #2b2a25;border-radius:22px;background:#fff;padding:6px 14px;font-weight:700;font-size:14px}
+  .gd-tbtn{border:1.5px solid #2b2a25;border-radius:7px;background:#fffdf6;padding:8px 14px;font-size:13px}
   .gd-tbtn.on{background:#2b2a25;color:#f6f2e7}
   .gd-eq{background:#fffdf6;border:1.5px solid #2b2a25;border-radius:10px;box-shadow:3px 3px 0 rgba(43,42,37,.12);padding:10px 14px;margin:12px 0}
   .gd-eqRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -1203,8 +1419,6 @@ function css() {
   .gd-sigPop{position:absolute;top:-13px;right:-6px;background:#0f766e;color:#fff;font-size:11px;border-radius:9px;padding:1px 7px;animation:gdrise .4s ease-out}
   .gd-sigPop.zero{background:#b3261e;font-size:9px;max-width:90px}
   @keyframes gdrise{from{transform:translateY(8px);opacity:0}to{transform:none;opacity:1}}
-  .gd-x{position:absolute;top:-8px;left:-8px;width:18px;height:18px;border-radius:50%;border:1.5px solid #2b2a25;background:#fff;font-size:9px;line-height:1;display:none;align-items:center;justify-content:center}
-  .gd-layer:hover .gd-x{display:flex}
   .gd-slotGhost{width:96px;height:96px;border:1.5px dashed #c7c0af;border-radius:10px;display:flex;align-items:center;justify-content:center;color:#c7c0af;font-size:18px}
   .gd-slotGhost.dragover{border-color:#2b2a25;color:#2b2a25;background:#fbf7ea}
   .gd-animBar{margin-top:10px;font-size:12px;color:#57534a;border-top:1px dashed #cfc8b6;padding-top:8px}
@@ -1212,18 +1426,18 @@ function css() {
   .gd-notes{margin-top:10px;border-top:1px dashed #cfc8b6;padding-top:7px;font-size:11px;color:#57534a;line-height:1.55}
   .gd-actions{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
   .gd-hand{display:flex;gap:8px;flex-wrap:wrap}
-  .gd-card{position:relative;width:92px;border:2px solid #57534a;border-radius:9px;background:#fff;box-shadow:2px 2px 0 rgba(43,42,37,.16);padding:4px;transition:transform .12s;cursor:grab;user-select:none}
+  .gd-card{position:relative;width:126px;border:2px solid #57534a;border-radius:11px;background:#fff;box-shadow:2px 2px 0 rgba(43,42,37,.16);padding:6px;transition:transform .12s;cursor:grab;user-select:none}
   .gd-card:hover{transform:translateY(-3px)}
   .gd-card.sel{transform:translateY(-8px);background:#fbf7ea;opacity:.55}
   .gd-card.static{cursor:default}
   .gd-card.static:hover{transform:none}
-  .gd-cardKey{position:absolute;bottom:2px;right:5px;font-size:9px;color:#b7b0a0}
-  .gd-ordBadge{position:absolute;top:-8px;right:-6px;color:#fff;width:19px;height:19px;border-radius:50%;font-size:10px;display:flex;align-items:center;justify-content:center;font-weight:700}
-  .gd-cbTop{display:flex;justify-content:space-between;align-items:center;border-radius:5px;padding:2px 6px;font-weight:700}
-  .gd-cbW{font-size:12px}
-  .gd-cbGlyph{font-size:19px;padding:4px 0 0;display:flex;justify-content:center}
-  .gd-cbName{font-size:10.5px;text-align:center}
-  .gd-cbSig{font-size:9px;text-align:center;color:#8a8271;padding-bottom:2px}
+  .gd-cardKey{position:absolute;bottom:3px;right:7px;font-size:10px;color:#b7b0a0}
+  .gd-ordBadge{position:absolute;top:-9px;right:-7px;color:#fff;width:23px;height:23px;border-radius:50%;font-size:12px;display:flex;align-items:center;justify-content:center;font-weight:700}
+  .gd-cbTop{display:flex;justify-content:space-between;align-items:center;border-radius:6px;padding:3px 7px;font-weight:700}
+  .gd-cbW{font-size:14px}
+  .gd-cbGlyph{font-size:25px;padding:6px 0 0;display:flex;justify-content:center}
+  .gd-cbName{font-size:13.5px;text-align:center;font-weight:700;margin-top:2px}
+  .gd-cbSig{font-size:11px;text-align:center;color:#8a8271;padding-bottom:3px}
   .gd-papersRow{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:4px 2px}
   .gd-paperChip{border:1px solid #8a8271;border-left:4px solid #2b2a25;background:#fff;border-radius:4px;padding:3px 8px;font-size:10.5px;cursor:help}
   .gd-paperChip em{color:#8a8271;font-style:normal;font-size:9px}
@@ -1271,5 +1485,25 @@ function css() {
   .gd-absHead{font-size:9px;letter-spacing:.14em;color:#8a8271}
   .gd-abstract p{font-size:12px;line-height:1.7}
   .gd-toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#2b2a25;color:#f6f2e7;border-radius:8px;padding:10px 18px;font-size:12px;z-index:60;box-shadow:0 4px 14px rgba(0,0,0,.3);max-width:90vw}
+  .gd-howwin{margin-top:20px;text-align:left;border:1.5px dashed #2b2a25;border-radius:9px;padding:12px 16px;background:#fbf7ea}
+  .gd-howwinHead{font-family:Georgia,serif;font-weight:700;margin-bottom:6px;letter-spacing:.02em}
+  .gd-howwinList{margin:0;padding-left:18px;font-size:11.5px;line-height:1.7;color:#3d3a30}
+  .gd-hoverCard{position:fixed;z-index:80;width:230px;background:#fffdf6;border:2px solid #2b2a25;border-radius:10px;box-shadow:5px 5px 0 rgba(43,42,37,.3);padding:11px 13px;pointer-events:none;font-size:11px;line-height:1.55}
+  .gd-hoverTitle{font-family:Georgia,serif;font-weight:700;font-size:14px;display:flex;justify-content:space-between;align-items:center;gap:6px}
+  .gd-hoverStat{display:flex;justify-content:space-between;margin-top:6px;font-size:11px}
+  .gd-hoverEff{display:inline-block;margin-top:5px;border-radius:4px;padding:2px 7px;font-weight:700;font-size:10px}
+  .gd-hoverEff.eff{background:#dcf5e5;color:#0f766e}
+  .gd-hoverEff.normal{background:#eee9da;color:#57534a}
+  .gd-hoverEff.weak{background:#fbeeed;color:#7f1d17}
+  .gd-hoverTip{margin-top:6px;color:#57534a}
+  .gd-hoverFlavor{margin-top:4px;color:#0f766e;font-style:italic}
+  .gd-briefing{font-size:11px;color:#57534a;margin-top:2px;font-style:italic}
+  .gd-discardSel{outline:2.5px solid #b3261e!important;outline-offset:2px}
+  .gd-discardMark{position:absolute;top:-8px;left:-8px;width:18px;height:18px;border-radius:50%;border:1.5px solid #b3261e;background:#fbeeed;color:#b3261e;font-size:10px;line-height:1;display:flex;align-items:center;justify-content:center;font-weight:700}
+  .gd-discardBtn{border:1.5px solid #b3261e;background:#fbeeed;color:#7f1d17;border-radius:8px;padding:10px 16px;font-size:13px}
+  .gd-discardBtn:disabled{opacity:.4}
+  .gd-gpu{background:#fffdf6;border:1.5px solid #2b2a25;border-radius:10px;box-shadow:3px 3px 0 rgba(43,42,37,.12);padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px;font-size:11.5px}
+  .gd-gpuDot{width:11px;height:11px;border-radius:50%;display:inline-block}
+  .gd-gpuOverkill{border-color:#b3261e}
   `;
 }

@@ -2,12 +2,74 @@ import React, { useState, useRef } from "react";
 import { Icon2 } from "./icons2.js";
 import {
   FLAVORS, SLOT_LABEL, MODELS, PROBLEMS, BONUS_DEFS, difficultyTone,
-  fmtTime, rankBoard, loadBoard, storageOK, clamp, TUTORIAL_V4,
+  fmtTime, rankBoard, loadBoard, storageOK, clamp, TUTORIAL_V4, HEAVY_MODELS,
 } from "./gd4-data.js";
 
 /* ═══════════════ small shared pieces, reused by the main v4 component ═══════════════ */
 
-export function CardFace({ card, type, size = "md", onClick, draggable, onDragStart, title }) {
+const SLOT_DESC = {
+  model: "Chooses the network architecture — the biggest single factor in whether it fits this data.",
+  compute: "Sets how much hardware you're training on. Too little for a heavy model or a big dataset and the run can crash.",
+  activation: "The nonlinearity between layers. ReLU/GELU are the safe modern defaults.",
+  loss: "What the network is actually optimized to minimize — pick one that matches the task.",
+  helper: "A supporting technique — usually about taming overfitting or steadying training.",
+  helper2: "A second supporting technique, stacked alongside the first Helper.",
+};
+
+function cardFlavorText(card, type) {
+  if (type === "model") {
+    const bits = [];
+    if (HEAVY_MODELS.includes(card.id)) bits.push("Compute-heavy — wants serious GPU power, weak on a bare CPU.");
+    if (["cnn", "unet", "cnn3d", "gnn"].includes(card.id)) bits.push("Strong on spatial/visual data.");
+    if (["rnn", "transformer"].includes(card.id)) bits.push("Suited to sequences read in order.");
+    if (card.id === "mlp") bits.push("The reliable default for flat tabular data.");
+    if (card.id === "gnn") bits.push("Needs data that's naturally a graph of connections.");
+    return bits.join(" ");
+  }
+  if (type === "compute") {
+    return ["Free, but limited.", "A real accelerator for small-to-medium models.", "Handles big models across several GPUs.", "Practically no ceiling — if you can afford it."][card.tier] || "";
+  }
+  if (type === "loss") {
+    if (card.id === "focal") return "Built for rare-event / imbalanced classification.";
+    if (card.id === "contrastive") return "For learning similarity, not a fixed label set.";
+    if (card.id === "xent") return "The standard classification workhorse.";
+    if (card.id === "mse") return "The standard regression workhorse.";
+  }
+  if (type === "activation") {
+    if (card.id === "relu" || card.id === "gelu") return "Modern default — gradients flow cleanly through deep stacks.";
+    return "Older choice — can suffer vanishing gradients when stacked deep.";
+  }
+  if (type === "helper") {
+    if (["dataaug", "dropout", "earlystop", "norm"].includes(card.id)) return "Helps against overfitting.";
+    if (card.id === "ensemble") return "Trades extra compute for a steadier final score.";
+    if (card.id === "aiscientist") return "Pure information — reveals the ideal model family.";
+  }
+  return "";
+}
+
+function effectivenessNote(card, type, problem) {
+  if (!problem) return null;
+  if (type === "model") {
+    if (problem.bestFit.includes(card.id)) return { text: "Effective for this problem", cls: "good" };
+    if (problem.okFit && problem.okFit.includes(card.id)) return { text: "Decent fit for this problem", cls: "ok" };
+    return { text: "Untested / normal here", cls: "meh" };
+  }
+  if (type === "loss") {
+    if (problem.bestLoss === card.id) return { text: "Ideal loss for this problem", cls: "good" };
+    if (problem.validLoss.includes(card.id)) return { text: "Valid loss for this problem", cls: "ok" };
+    return { text: "Untested / normal here", cls: "meh" };
+  }
+  if (type === "compute") {
+    if (card.tier < problem.minTier) return { text: "Likely too little compute here", cls: "meh" };
+    return { text: "Sufficient compute for this problem", cls: "ok" };
+  }
+  return null;
+}
+
+export function CardFace({ card, type, size = "md", onClick, draggable, onDragStart, title, problem, selected }) {
+  const [hover, setHover] = useState(false);
+  const [pos, setPos] = useState({ x: 0, y: 0 });
+  function move(e) { setPos({ x: e.clientX, y: e.clientY }); }
   if (!card) {
     return (
       <div className={"gd4-slot empty " + size}>
@@ -16,11 +78,56 @@ export function CardFace({ card, type, size = "md", onClick, draggable, onDragSt
       </div>
     );
   }
+  const eff = effectivenessNote(card, type, problem);
+  const flavor = cardFlavorText(card, type);
   return (
-    <div className={"gd4-cardFace " + size} title={title || card.tip} onClick={onClick} draggable={draggable} onDragStart={onDragStart}>
+    <div
+      className={"gd4-cardFace " + size + (selected ? " selected" : "")}
+      title={title}
+      onClick={onClick} draggable={draggable} onDragStart={onDragStart}
+    >
+      <button
+        className="gd4-cardInfo"
+        tabIndex={-1}
+        onClick={e => e.stopPropagation()}
+        onMouseEnter={e => { e.stopPropagation(); setHover(true); move(e); }}
+        onMouseMove={e => { e.stopPropagation(); move(e); }}
+        onMouseLeave={e => { e.stopPropagation(); setHover(false); }}
+      >i</button>
       <div className="gd4-cardIconWrap"><Icon2 id={card.icon} size={size === "lg" ? 40 : 30} primary="var(--primary)" accent="var(--accent)" /></div>
       <div className="gd4-cardName">{card.name}</div>
       <div className="gd4-cardType">{SLOT_LABEL[card.slotType]}</div>
+      {hover && (
+        <div className="gd4-cardTip" style={{ left: pos.x + 16, top: pos.y + 16 }} onMouseMove={e => e.stopPropagation()}>
+          <div className="gd4-cardTipName">{card.name}{card.tier != null ? <span className="gd4-tiny"> · tier {card.tier}</span> : null}</div>
+          <div className="gd4-cardTipStat">{card.tip}</div>
+          <div className="gd4-cardTipSlot">{SLOT_DESC[type] || SLOT_DESC[card.slotType]}</div>
+          {flavor && <div className="gd4-cardTipFlavor">{flavor}</div>}
+          {eff && <div className={"gd4-cardTipEff " + eff.cls}>{eff.text}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function HudChip({ children, tip, className }) {
+  const [hover, setHover] = useState(false);
+  const [pos, setPos] = useState({ x: 0, y: 0 });
+  function move(e) { setPos({ x: e.clientX, y: e.clientY }); }
+  return (
+    <div
+      className={"gd4-chip" + (className ? " " + className : "")}
+      style={{ display: "inline-flex", alignItems: "center", position: "relative" }}
+      onMouseEnter={e => { setHover(true); move(e); }}
+      onMouseMove={move}
+      onMouseLeave={() => setHover(false)}
+    >
+      {children}
+      {hover && tip && (
+        <div className="gd4-cardTip" style={{ left: pos.x + 14, top: pos.y + 14 }} onMouseMove={e => e.stopPropagation()}>
+          {tip}
+        </div>
+      )}
     </div>
   );
 }

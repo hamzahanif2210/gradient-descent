@@ -2,14 +2,14 @@ import React, { useState, useEffect, useRef } from "react";
 import { Icon2 } from "./src/icons2.js";
 import {
   hashStr, mulberry32, shuffle, fmtTime, FLAVORS, themeVars,
-  MODELS, PROBLEMS, difficultyTone, buildMainDeck, requiredTypes, freshProblemState,
+  MODELS, PROBLEMS, difficultyTone, difficultyBrief, buildMainDeck, freshProblemState,
   BONUS_DEFS, makeBonusShop, solveReward, STARTING_COMPUTE, HAND_MAX,
   computeOutcome, makeCurve, outcomeLabel, verdictText, tickerText,
-  addBoardResult, TUTORIAL_V4,
+  addBoardResult, TUTORIAL_V4, gpuComputeTier, gpuComputeLabel, optimalSuggestion,
 } from "./src/gd4-data.js";
 import {
   CardFace, LossCurve, Tutorial, LeaderboardPanel, FlavorCarousel,
-  BriefingModal, NotebookModal, BonusCard,
+  BriefingModal, NotebookModal, BonusCard, HudChip,
 } from "./src/gd4-components.jsx";
 
 /* ═══════════════════════════════════════════════════════════════
@@ -20,6 +20,8 @@ import {
    attempt ends, gets recorded, and you restart from problem 1.
    ═══════════════════════════════════════════════════════════════ */
 
+const BUILD_MAX = 7;
+
 function buildFreshRun(base) {
   const rng = mulberry32(hashStr(base.seedStr + "-deck-life" + base.runAttempt));
   const deck = buildMainDeck(rng);
@@ -29,7 +31,7 @@ function buildFreshRun(base) {
     totalTries: 0, triesUsedThisProblem: 0, results: [], notebookUnlocked: [], compute: STARTING_COMPUTE,
     deck, hand: [], usedPile: [], bonusDeck: [], lastSolvedLoadout: null,
     discardsUsed: 0, discardsMax: 3,
-    slots: { model: null, compute: null, activation: null, loss: null, helper: null, helper2: null },
+    built: [], gpuBoostArmed: false,
     problemState: freshProblemState(),
     runAnim: null, lastRun: null, sessionOver: null, pendingShop: false, insightPeek: null, dealSeq: 0,
   };
@@ -44,10 +46,10 @@ function dealUpTo(gg, capOverride = null) {
   return { ...gg, deck, hand };
 }
 
+const REQUIRED_BUILD_TYPES = ["model", "activation", "loss"];
 function checkMillOut(gg) {
   if (gg.sessionOver || gg.deck.length > 0) return gg;
-  const req = requiredTypes(gg.problemState).filter(t => t !== "helper2");
-  const missing = req.some(t => !gg.hand.some(c => c.slotType === t) && !gg.slots[t]);
+  const missing = REQUIRED_BUILD_TYPES.some(t => !gg.hand.some(c => c.slotType === t) && !gg.built.some(c => c.slotType === t));
   if (!missing) return gg;
   return endSession(gg, "milled");
 }
@@ -62,10 +64,10 @@ function recapEntry(gg, fullClear) {
     bestModel: best ? best.modelName : "—", fullClear, date: finishedAt,
   };
 }
-function endSession(gg, reason) {
+function endSession(gg, reason, extra) {
   const entry = recapEntry(gg, false);
   if (gg.mode === "speedrun") addBoardResult(entry);
-  return { ...gg, sessionOver: { reason, entry } };
+  return { ...gg, sessionOver: { reason, entry, ...(extra || {}) } };
 }
 function endSessionWin(gg) {
   const entry = recapEntry(gg, true);
@@ -93,6 +95,7 @@ function applyBonusEffect(gg, def) {
     case "overclock": ps.overclockArmed = true; break;
     case "safety_net": ps.safetyNetArmed = true; break;
     case "deck_insight": g2.insightPeek = g2.deck.slice(0, 3); break;
+    case "gpu_boost": g2.gpuBoostArmed = true; break;
     case "transfer": {
       if (g2.lastSolvedLoadout) {
         const modelCard = g2.lastSolvedLoadout.find(c => c.slotType === "model");
@@ -119,6 +122,9 @@ export default function GradientDescentV4() {
   const [shop, setShop] = useState(null);
   const [fast, setFast] = useState(false);
   const [now, setNow] = useState(0);
+  const [discSel, setDiscSel] = useState(new Set());
+  const [showOptimalEnd, setShowOptimalEnd] = useState(false);
+  const [showOptimalOver, setShowOptimalOver] = useState(false);
 
   const gRef = useRef(null); gRef.current = g;
   const busyRef = useRef(false);
@@ -150,50 +156,60 @@ export default function GradientDescentV4() {
   function restartRun() {
     const gg = gRef.current; if (!gg) return;
     const g2 = buildFreshRun({ nickname: gg.nickname, flavorId: gg.flavorId, mode: gg.mode, seedStr: gg.seedStr, runAttempt: (gg.runAttempt || 1) + 1 });
-    setG(g2); setModal("briefing"); setShop(null); setScreen("game");
+    setG(g2); setModal("briefing"); setShop(null); setScreen("game"); setShowOptimalOver(false); setDiscSel(new Set());
   }
-  function backToMenu() { setG(null); setNickname(""); setModal(null); setShop(null); setScreen("start"); }
+  function backToMenu() { setG(null); setNickname(""); setModal(null); setShop(null); setScreen("start"); setShowOptimalOver(false); }
 
-  /* ---------- hand / slots ---------- */
-  function placeCard(uid) {
+  /* ---------- hand / build zone ----------
+     Build is now a free-form list of dropped cards (any count, any
+     order) instead of fixed named slots. */
+  function placeCardToBuild(uid) {
+    setDiscSel(s => (s.has(uid) ? (() => { const n = new Set(s); n.delete(uid); return n; })() : s));
     setG(gg => {
       if (!gg || busyRef.current || gg.runAnim || gg.sessionOver) return gg;
+      if (gg.built.length >= BUILD_MAX) return gg;
       const card = gg.hand.find(c => c.uid === uid); if (!card) return gg;
-      const type = card.slotType;
-      const req = requiredTypes(gg.problemState);
-      if (!req.includes(type) && !(type === "helper" && req.includes("helper2"))) return gg;
-      let targetKey = type;
-      if (type === "helper" && gg.slots.helper && req.includes("helper2") && !gg.slots.helper2) targetKey = "helper2";
-      if (gg.slots[targetKey]) return gg;
       const hand = gg.hand.filter(c => c.uid !== uid);
-      let g2 = { ...gg, hand, slots: { ...gg.slots, [targetKey]: card } };
+      let g2 = { ...gg, hand, built: [...gg.built, card] };
       g2 = dealUpTo(g2);
       g2 = checkMillOut(g2);
       return g2;
     });
   }
-  function unplaceCard(slotKey) {
+  function unplaceFromBuild(uid) {
     setG(gg => {
       if (!gg || busyRef.current || gg.runAnim) return gg;
-      const card = gg.slots[slotKey]; if (!card) return gg;
-      return { ...gg, slots: { ...gg.slots, [slotKey]: null }, hand: [...gg.hand, card] };
+      const card = gg.built.find(c => c.uid === uid); if (!card) return gg;
+      return { ...gg, built: gg.built.filter(c => c.uid !== uid), hand: [...gg.hand, card] };
     });
   }
-  function discardHandCard(uid) {
+  function toggleDiscSel(uid) {
+    setDiscSel(s => {
+      const n = new Set(s);
+      if (n.has(uid)) n.delete(uid); else n.add(uid);
+      return n;
+    });
+  }
+  function discardSelected() {
     setG(gg => {
       if (!gg || busyRef.current || gg.runAnim) return gg;
-      if (gg.discardsUsed >= gg.discardsMax) return gg;
-      const card = gg.hand.find(c => c.uid === uid); if (!card) return gg;
-      let g2 = { ...gg, hand: gg.hand.filter(c => c.uid !== uid), discardsUsed: gg.discardsUsed + 1, usedPile: [...gg.usedPile, card] };
+      const remaining = gg.discardsMax - gg.discardsUsed;
+      if (remaining <= 0) return gg;
+      const uids = gg.hand.filter(c => discSel.has(c.uid)).map(c => c.uid).slice(0, remaining);
+      if (uids.length === 0) return gg;
+      const uidSet = new Set(uids);
+      const discardedCards = gg.hand.filter(c => uidSet.has(c.uid));
+      let g2 = { ...gg, hand: gg.hand.filter(c => !uidSet.has(c.uid)), discardsUsed: gg.discardsUsed + uids.length, usedPile: [...gg.usedPile, ...discardedCards] };
       g2 = dealUpTo(g2);
       g2 = checkMillOut(g2);
       return g2;
     });
+    setDiscSel(new Set());
   }
   function onDragStartHand(e, uid) { e.dataTransfer.setData("text/plain", "h:" + uid); e.dataTransfer.effectAllowed = "move"; }
-  function onDragStartSlot(e, key) { e.dataTransfer.setData("text/plain", "s:" + key); }
-  function onDropSlot(e) { e.preventDefault(); const d = e.dataTransfer.getData("text/plain"); if (d.startsWith("h:")) placeCard(d.slice(2)); }
-  function onDropHand(e) { e.preventDefault(); const d = e.dataTransfer.getData("text/plain"); if (d.startsWith("s:")) unplaceCard(d.slice(2)); }
+  function onDragStartBuilt(e, uid) { e.dataTransfer.setData("text/plain", "b:" + uid); e.dataTransfer.effectAllowed = "move"; }
+  function onDropBuildZone(e) { e.preventDefault(); const d = e.dataTransfer.getData("text/plain"); if (d.startsWith("h:")) placeCardToBuild(d.slice(2)); }
+  function onDropHand(e) { e.preventDefault(); const d = e.dataTransfer.getData("text/plain"); if (d.startsWith("b:")) unplaceFromBuild(d.slice(2)); }
 
   /* ---------- bonuses ---------- */
   function playBonus(instanceUid) {
@@ -213,40 +229,46 @@ export default function GradientDescentV4() {
   function runNetwork() {
     const gg = gRef.current;
     if (!gg || busyRef.current || gg.runAnim || gg.sessionOver) return;
-    const req = requiredTypes(gg.problemState);
-    if (!req.every(t => gg.slots[t])) return;
+    const types = gg.built.map(c => c.slotType);
+    if (!(types.includes("model") && types.includes("activation") && types.includes("loss"))) return;
     busyRef.current = true;
     const problem = PROBLEMS[gg.problemIndex];
     const rng = mulberry32(hashStr(gg.seedStr + "-run-" + problem.id + "-" + gg.triesUsedThisProblem + "-" + gg.dealSeq + "-" + gg.runAttempt));
-    const usedSlotsSnapshot = { ...gg.slots };
-    const opts = { overclock: !!gg.problemState.overclockArmed, safetyNet: !!gg.problemState.safetyNetArmed, helper2: gg.slots.helper2 || null };
-    const result = computeOutcome(usedSlotsSnapshot, problem, rng, opts);
+    const usedBuiltSnapshot = [...gg.built];
+    const opts = { overclock: !!gg.problemState.overclockArmed, safetyNet: !!gg.problemState.safetyNetArmed };
+    const result = computeOutcome(usedBuiltSnapshot, problem, rng, opts);
     const curve = makeCurve(result.outcome, result.fit, rng);
     const total = curve.pts.length;
-    setG(x => ({ ...x, runAnim: { result, curve, step: 0 } }));
+    // no GPU-boost bonus active → run on the old lab CPU: slower animation
+    // pacing only, never affects the scoring math above.
+    const cpuMode = !gg.gpuBoostArmed;
+    const baseDelay = cpuMode ? 260 : 130;
+    const delay = fastRef.current ? Math.round(baseDelay / 2) : baseDelay;
+    const initLog = [cpuMode ? "Running on CPU (no GPU bonus active)..." : "Running on GPU — accelerated training..."];
+    setG(x => ({ ...x, runAnim: { result, curve, step: 0, log: initLog, cpuMode } }));
     const iv = setInterval(() => {
       setG(x => {
         if (!x || !x.runAnim) { clearInterval(iv); return x; }
         const step = x.runAnim.step + 1;
+        const log = [...x.runAnim.log, tickerText({ result, curve, step })];
         if (step >= total) {
           clearInterval(iv);
-          setTimeout(() => commitRun(result, curve, problem, usedSlotsSnapshot), fastRef.current ? 250 : 700);
-          return { ...x, runAnim: { ...x.runAnim, step: total } };
+          setTimeout(() => commitRun(result, curve, problem, usedBuiltSnapshot), fastRef.current ? 250 : 700);
+          return { ...x, runAnim: { ...x.runAnim, step: total, log } };
         }
-        return { ...x, runAnim: { ...x.runAnim, step } };
+        return { ...x, runAnim: { ...x.runAnim, step, log } };
       });
-    }, fastRef.current ? 70 : 130);
+    }, delay);
     animRef.current = iv;
   }
 
-  function commitRun(result, curve, problem, usedSlotsSnapshot) {
+  function commitRun(result, curve, problem, usedBuilt) {
     busyRef.current = false;
     setG(gg => {
       if (!gg) return gg;
       let g2 = { ...gg, runAnim: null, totalTries: gg.totalTries + 1, triesUsedThisProblem: gg.triesUsedThisProblem + 1, dealSeq: gg.dealSeq + 1 };
-      const usedCards = Object.values(usedSlotsSnapshot).filter(Boolean);
-      g2.usedPile = [...g2.usedPile, ...usedCards];
-      g2.slots = { model: null, compute: null, activation: null, loss: null, helper: null, helper2: null };
+      g2.usedPile = [...g2.usedPile, ...usedBuilt];
+      g2.built = [];
       const ps = { ...g2.problemState };
       if (ps.overclockArmed) ps.overclockArmed = false;
       if (result.safetyNetUsed) ps.safetyNetArmed = false;
@@ -254,11 +276,12 @@ export default function GradientDescentV4() {
 
       const saved = !result.solved && ps.secondAttemptArmed;
       g2.lastRun = { ...result, curve, saved };
+      const modelCard = result.modelUsed || usedBuilt.find(c => c.slotType === "model");
 
       if (result.solved) {
         if (!g2.notebookUnlocked.includes(problem.id)) g2.notebookUnlocked = [...g2.notebookUnlocked, problem.id];
-        g2.results = [...g2.results, { problemId: problem.id, solved: true, tries: g2.triesUsedThisProblem, score: result.finalScore, modelId: usedSlotsSnapshot.model.id, modelName: usedSlotsSnapshot.model.name }];
-        g2.lastSolvedLoadout = usedCards;
+        g2.results = [...g2.results, { problemId: problem.id, solved: true, tries: g2.triesUsedThisProblem, score: result.finalScore, modelId: modelCard ? modelCard.id : null, modelName: modelCard ? modelCard.name : "—" }];
+        g2.lastSolvedLoadout = usedBuilt;
         g2.compute += solveReward(problem, g2.triesUsedThisProblem);
         g2 = dealUpTo(g2);
         g2 = checkMillOut(g2);
@@ -273,7 +296,9 @@ export default function GradientDescentV4() {
         g2 = checkMillOut(g2);
         return g2;
       }
-      return endSession(g2, "failed");
+      const tier = gpuComputeTier(usedBuilt);
+      const gpuOverkill = gpuComputeLabel(tier) === "High" && difficultyTone(problem.difficulty) === "easy";
+      return endSession(g2, "failed", gpuOverkill ? { gpuOverkill: true } : null);
     });
   }
 
@@ -320,6 +345,18 @@ export default function GradientDescentV4() {
           <h1 className="gd4-title">GRADIENT<br />DESCENT</h1>
           <p className="gd4-sub">Run an AI lab across 10 real open-science problems, sharing one deck for the whole attempt. Fail a Run, or run out of cards, and it's over — restart from problem 1.</p>
 
+          <div className="gd4-howToWin">
+            <div className="gd4-fieldLabel" style={{ margin: "0 0 6px" }}>How to win</div>
+            <ul>
+              <li>One shared deck across all 10 problems — nothing resets between them.</li>
+              <li>Fill your hand of cards into each problem's required slots, then hit ▶ Run.</li>
+              <li>Beat the target metric to solve a problem and move on.</li>
+              <li>Discards are limited for the whole run — spend them wisely.</li>
+              <li>Fail a Run and it's permadeath — the whole attempt ends, restart from problem 1.</li>
+              <li>Second Attempt and Safety Net bonus cards can save a bad Run — buy them at the Grant Committee.</li>
+            </ul>
+          </div>
+
           <label className="gd4-field">
             <span>Nickname</span>
             <input className="gd4-input" value={nickname} onChange={e => setNickname(e.target.value)} placeholder="shown on the leaderboard" maxLength={20} />
@@ -355,14 +392,32 @@ export default function GradientDescentV4() {
     const so = g.sessionOver || {};
     const won = so.reason === "won";
     const milled = so.reason === "milled";
+    const failed = so.reason === "failed";
     const headline = won ? "STATE OF THE ART" : milled ? "DECK EXHAUSTED" : "RUN OVER";
+    const failProblem = PROBLEMS[g.problemIndex];
     return (
       <div className="gd4-root gd4-center" style={themeVars(flavor)}><style>{css()}</style>
         <div className="gd4-startCard">
           <div className="gd4-eyebrow">{won ? "full clear" : milled ? "out of cards" : "training diverged"}</div>
           <h1 className="gd4-title" style={{ fontSize: 40 }}>{headline}</h1>
           <p className="gd4-sub">{g.nickname} · {flavor.name} · {g.mode === "speedrun" ? "Speedrun" : "Learn"} mode · life #{g.runAttempt}</p>
+          {so.gpuOverkill && (
+            <p className="gd4-gpuOverkill">🎓 Your professor is disheartened that you used so much GPU compute on such a simple problem.</p>
+          )}
           {g.lastRun && !milled && !won && <LossCurve curve={g.lastRun.curve} step={g.lastRun.curve.pts.length} outcome={g.lastRun.outcome} />}
+          {failed && failProblem && (
+            <div style={{ margin: "10px 0" }}>
+              <button className="gd4-btn sm" onClick={() => setShowOptimalOver(o => !o)}>{showOptimalOver ? "Hide" : "View"} optimal solution</button>
+              {showOptimalOver && (() => {
+                const opt = optimalSuggestion(failProblem);
+                return (
+                  <div className="gd4-optimalBox">
+                    Ideal model family: <b>{opt.modelNames}</b> · ideal loss: <b>{opt.lossName}</b> · compute: <b>{opt.computeNote}</b>.
+                  </div>
+                );
+              })()}
+            </div>
+          )}
           <div className="gd4-abstract">
             <div className="gd4-absRow"><span>Solved</span><b>{so.entry ? so.entry.solvedCount : g.results.filter(r => r.solved).length} / 10</b></div>
             {g.mode === "speedrun" && <div className="gd4-absRow"><span>Total time</span><b>{fmtTime((so.entry && so.entry.totalTimeMs) || 0)}</b></div>}
@@ -390,7 +445,9 @@ export default function GradientDescentV4() {
       <div className="gd4-root" style={themeVars(flavor)}><style>{css()}</style>
         <div className="gd4-top">
           <div className="gd4-brand">GRADIENT DESCENT</div>
-          <div className="gd4-topbtns"><span className="gd4-chip">⚡ {g.compute}</span></div>
+          <div className="gd4-topbtns">
+            <HudChip tip="Compute (⚡) — earned by solving problems, spent in the Grant Committee shop on bonus cards.">⚡ {g.compute}</HudChip>
+          </div>
         </div>
         <div className="gd4-shop">
           <div className="gd4-shopHead">
@@ -417,8 +474,8 @@ export default function GradientDescentV4() {
   }
 
   /* ---------- main game screen ---------- */
-  const req = requiredTypes(g.problemState);
-  const allFilled = req.every(t => g.slots[t]);
+  const builtTypes = g.built.map(c => c.slotType);
+  const canRun = builtTypes.includes("model") && builtTypes.includes("activation") && builtTypes.includes("loss");
   const elapsed = g.mode === "speedrun" ? (now || Date.now()) - g.startedAt : null;
   const showEndCard = !g.runAnim && g.lastRun && !g.sessionOver;
 
@@ -434,9 +491,15 @@ export default function GradientDescentV4() {
           })}
         </div>
         <div className="gd4-topbtns">
-          {g.mode === "speedrun" && <span className="gd4-chip">⏱ {fmtTime(elapsed)}</span>}
-          <span className="gd4-chip">⚡ {g.compute}</span>
-          <span className="gd4-chip">discards {g.discardsMax - g.discardsUsed}/{g.discardsMax}</span>
+          {g.mode === "speedrun" && <HudChip tip="Elapsed time this speedrun attempt — recorded on the userboard.">⏱ {fmtTime(elapsed)}</HudChip>}
+          <HudChip tip="Compute (⚡) — earned by solving problems, spent in the Grant Committee shop on bonus cards.">⚡ {g.compute}</HudChip>
+          <HudChip tip="Discards left for the whole run — swap unwanted hand cards for fresh ones from the deck.">discards {g.discardsMax - g.discardsUsed}/{g.discardsMax}</HudChip>
+          <HudChip tip={`Main deck: ${g.deck.length} cards left to draw, ${g.usedPile.length} used so far this attempt.`}>🂠 {g.deck.length}/{g.usedPile.length}</HudChip>
+          {(() => {
+            const tier = gpuComputeTier(g.built);
+            const label = gpuComputeLabel(tier);
+            return <HudChip tip="Estimated GPU compute load of your current build — Low/Medium/High." className={"gpu-" + label.toLowerCase()}>GPU {label}</HudChip>;
+          })()}
           <button className="gd4-tbtn" onClick={() => setModal("briefing")}>📖 Briefing</button>
           <button className="gd4-tbtn" onClick={() => setModal("notebook")}>📓 {g.notebookUnlocked.length}/10</button>
           <button className="gd4-tbtn" onClick={() => setModal("leaderboard")}>🏆</button>
@@ -456,9 +519,11 @@ export default function GradientDescentV4() {
                   <span className={"gd4-diff " + difficultyTone(problem.difficulty)}>{problem.difficulty}</span>
                 </div>
                 <div className="gd4-tiny">{problem.field} · {problem.dataType} · target {problem.target} {problem.metricLabel}</div>
+                <div className="gd4-diffBrief">{difficultyBrief(problem.difficulty)}</div>
               </div>
               <button className="gd4-btn sm" style={{ marginLeft: "auto" }} onClick={() => setModal("briefing")}>Full briefing</button>
             </div>
+            {problem.why && <p className="gd4-why">{problem.why}</p>}
             {g.problemState.revealed && (
               <p className="gd4-reveal">🔭 Peer Review: the ideal model family here is <b>{problem.bestFit.map(id => MODELS.find(m => m.id === id).name).join(" or ")}</b>.</p>
             )}
@@ -477,34 +542,43 @@ export default function GradientDescentV4() {
             <div className="gd4-infoBox">
               <div className="gd4-infoTitleRow"><b>🔎 Deck Insight — top of deck</b><button className="gd4-btn sm" style={{ marginLeft: "auto" }} onClick={() => setG(x => ({ ...x, insightPeek: null }))}>Close</button></div>
               <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                {g.insightPeek.map((c, i) => <CardFace key={i} card={c} type={c.slotType} size="sm" />)}
+                {g.insightPeek.map((c, i) => <CardFace key={i} card={c} type={c.slotType} size="sm" problem={problem} />)}
               </div>
             </div>
           )}
 
           {!g.runAnim && !showEndCard && (
             <>
-              <div className="gd4-slotsGrid">
-                {req.map(type => (
-                  <div key={type} onDragOver={e => e.preventDefault()} onDrop={onDropSlot}>
-                    <CardFace card={g.slots[type]} type={type} size="md"
-                      onClick={() => g.slots[type] && unplaceCard(type)}
-                      draggable={!!g.slots[type]} onDragStart={e => onDragStartSlot(e, type)} />
-                  </div>
-                ))}
+              <div className="gd4-buildZone" onDragOver={e => e.preventDefault()} onDrop={onDropBuildZone}>
+                <div className="gd4-netHead"><span>YOUR NETWORK <em className="gd4-tiny">drag cards here, any order (max {BUILD_MAX} cards)</em></span></div>
+                <div className="gd4-buildRow">
+                  {g.built.length === 0 && <div className="gd4-buildEmpty">drop cards here to build your network</div>}
+                  {g.built.map(c => (
+                    <CardFace key={c.uid} card={c} type={c.slotType} size="md" problem={problem}
+                      onClick={() => unplaceFromBuild(c.uid)}
+                      draggable onDragStart={e => onDragStartBuilt(e, c.uid)} />
+                  ))}
+                </div>
               </div>
 
               <div className="gd4-actionsRow">
-                <button className="gd4-btn primary lg" disabled={!allFilled} onClick={runNetwork}>▶ Run</button>
+                <span className="gd4-runTipWrap">
+                  <button className="gd4-btn primary lg" disabled={!canRun} onClick={runNetwork}>▶ Run</button>
+                  <span className="gd4-runTip">To run: at least one Model, one Activation and one Loss card</span>
+                </span>
+                <button className="gd4-btn lg danger" disabled={discSel.size === 0 || g.discardsUsed >= g.discardsMax} onClick={discardSelected}>
+                  🗑 Discard selected {discSel.size > 0 ? `(${Math.min(discSel.size, g.discardsMax - g.discardsUsed)})` : ""}
+                </button>
               </div>
 
               <div className="gd4-handWrap" onDragOver={e => e.preventDefault()} onDrop={onDropHand}>
-                <div className="gd4-netHead"><span>YOUR HAND <em className="gd4-tiny">click or drag into a matching slot</em></span></div>
+                <div className="gd4-netHead"><span>YOUR HAND <em className="gd4-tiny">drag into your network below · click a card to select it, then discard</em></span></div>
                 <div className="gd4-hand">
                   {g.hand.map(c => (
                     <div key={c.uid} className="gd4-handCard">
-                      <CardFace card={c} type={c.slotType} size="sm" draggable onDragStart={e => onDragStartHand(e, c.uid)} onClick={() => placeCard(c.uid)} />
-                      <button className="gd4-discardX" disabled={g.discardsUsed >= g.discardsMax} title="Discard (uses 1 of your session discards)" onClick={() => discardHandCard(c.uid)}>✕</button>
+                      <CardFace card={c} type={c.slotType} size="sm" problem={problem} selected={discSel.has(c.uid)}
+                        draggable onDragStart={e => onDragStartHand(e, c.uid)}
+                        onClick={() => g.discardsUsed < g.discardsMax && toggleDiscSel(c.uid)} />
                     </div>
                   ))}
                 </div>
@@ -513,19 +587,16 @@ export default function GradientDescentV4() {
           )}
 
           {g.runAnim && (
-            <div className="gd4-runBox">
-              <LossCurve curve={g.runAnim.curve} step={g.runAnim.step} outcome={g.runAnim.result.outcome} />
-              <div className="gd4-runTicker">{tickerText(g.runAnim)}</div>
+            <div className="gd4-runLayout">
+              <div className="gd4-runLog">
+                <div className="gd4-tiny" style={{ marginBottom: 6 }}>TRAINING LOG</div>
+                {g.runAnim.log.map((line, i) => <div key={i} className="gd4-runLogLine">{line}</div>)}
+              </div>
+              <div className="gd4-runPlot">
+                <LossCurve curve={g.runAnim.curve} step={g.runAnim.step} outcome={g.runAnim.result.outcome} />
+              </div>
             </div>
           )}
-        </div>
-
-        <div className="gd4-deckSide">
-          <div className="gd4-deckPanel">
-            <Icon2 id="deckback" size={48} primary="var(--primary)" accent="var(--accent)" />
-            <div className="gd4-deckCount">{g.deck.length} left in deck</div>
-            <div className="gd4-tiny">used: {g.usedPile.length}</div>
-          </div>
         </div>
       </div>
 
@@ -536,11 +607,22 @@ export default function GradientDescentV4() {
             <h2 className="gd4-h2">{g.lastRun.solved ? "Target beaten ✓" : (g.lastRun.saved ? "Saved by Second Attempt" : (g.lastRun.outcome === "oom" ? "Run wasted" : "Target missed"))}</h2>
             <LossCurve curve={g.lastRun.curve} step={g.lastRun.curve.pts.length} outcome={g.lastRun.outcome} />
             <p className="gd4-body">{verdictText(g.lastRun, problem, g.lastRun.saved)}</p>
+            <div style={{ margin: "4px 0 10px" }}>
+              <button className="gd4-btn sm" onClick={() => setShowOptimalEnd(o => !o)}>{showOptimalEnd ? "Hide" : "View"} optimal solution</button>
+              {showOptimalEnd && (() => {
+                const opt = optimalSuggestion(problem);
+                return (
+                  <div className="gd4-optimalBox">
+                    Ideal model family: <b>{opt.modelNames}</b> · ideal loss: <b>{opt.lossName}</b> · compute: <b>{opt.computeNote}</b>.
+                  </div>
+                );
+              })()}
+            </div>
             <div className="gd4-modalFoot">
               {g.lastRun.solved ? (
                 <button className="gd4-btn primary lg" onClick={openShop}>Continue to Grant Committee →</button>
               ) : (
-                <button className="gd4-btn primary lg" onClick={() => setG(x => ({ ...x, lastRun: null }))}>Try again →</button>
+                <button className="gd4-btn primary lg" onClick={() => { setG(x => ({ ...x, lastRun: null })); setShowOptimalEnd(false); }}>Try again →</button>
               )}
             </div>
           </div>
@@ -589,6 +671,10 @@ function css() {
   .gd4-fieldLabel em{font-style:normal;text-transform:none;letter-spacing:0;opacity:.8}
   .gd4-startActions{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:20px}
 
+  .gd4-howToWin{text-align:left;background:var(--bg);border:1.5px solid var(--border);border-radius:9px;padding:12px 16px;margin:0 auto 18px;max-width:520px}
+  .gd4-howToWin ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
+  .gd4-howToWin li{color:var(--muted);font-size:12px;line-height:1.5}
+
   .gd4-btn{border:1.5px solid var(--border);background:var(--bg);color:var(--text);border-radius:8px;padding:9px 15px;font-size:12.5px;box-shadow:2px 2px 0 var(--shadow)}
   .gd4-btn.sm{padding:5px 10px;font-size:11px;box-shadow:none}
   .gd4-btn.lg{padding:11px 18px;font-size:13px}
@@ -615,17 +701,17 @@ function css() {
   .gd4-pdot{width:9px;height:9px;border-radius:50%;background:var(--border);display:inline-block}
   .gd4-pdot.cur{background:var(--primary);box-shadow:0 0 0 3px color-mix(in srgb, var(--primary) 30%, transparent)}
   .gd4-pdot.solved,.gd4-pdot.done{background:var(--accent)}
-  .gd4-topbtns{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-  .gd4-chip{border:1.5px solid var(--border);border-radius:20px;background:var(--bg);padding:3px 10px;font-weight:700;font-size:11px}
-  .gd4-tbtn{border:1.5px solid var(--border);border-radius:6px;background:var(--bg);padding:5px 10px;font-size:11px}
+  .gd4-topbtns{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .gd4-chip{border:1.5px solid var(--border);border-radius:22px;background:var(--bg);padding:7px 16px;font-weight:700;font-size:14px}
+  .gd4-tbtn{border:1.5px solid var(--border);border-radius:7px;background:var(--bg);padding:8px 14px;font-size:13px}
   .gd4-tbtn.on{background:var(--primary);color:var(--bg)}
 
   .gd4-gameBody{display:flex;gap:16px;max-width:1100px;margin:0 auto;padding:14px 14px 40px;align-items:flex-start}
   .gd4-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px}
-  .gd4-deckSide{width:150px;flex:none;position:sticky;top:14px}
-  .gd4-deckPanel{display:flex;flex-direction:column;align-items:center;gap:4px;border:1.5px dashed var(--border);border-radius:10px;background:var(--surface);padding:16px 10px;box-shadow:3px 3px 0 var(--shadow)}
-  .gd4-deckCount{font-size:11px;color:var(--text);font-weight:700;text-align:center}
-  @media(max-width:760px){.gd4-gameBody{flex-direction:column}.gd4-deckSide{width:100%;position:static}.gd4-deckPanel{flex-direction:row;justify-content:center;gap:12px}}
+  .gd4-chip.gpu-low{color:var(--accent)}
+  .gd4-chip.gpu-medium{color:#d97706}
+  .gd4-chip.gpu-high{color:#ef4444}
+  @media(max-width:760px){.gd4-gameBody{flex-direction:column}}
 
   .gd4-infoBox{background:var(--surface);border:1.5px solid var(--border);border-radius:10px;box-shadow:3px 3px 0 var(--shadow);padding:14px 16px}
   .gd4-infoHead{display:flex;gap:12px;align-items:flex-start;margin-bottom:6px}
@@ -635,7 +721,11 @@ function css() {
   .gd4-diff.med{background:#fef3c7;color:#92400e}
   .gd4-diff.hard{background:#fee2e2;color:#991b1b}
   .gd4-reveal{font-size:11.5px;color:var(--primary);margin:6px 0 0}
+  .gd4-why{font-size:11.5px;line-height:1.6;color:var(--muted);margin:8px 0 0;border-top:1px dashed var(--border);padding-top:8px}
+  .gd4-diffBrief{font-size:11px;color:var(--muted);margin-top:3px;font-style:italic}
   .gd4-targetRow{margin-top:8px;font-size:11.5px;color:var(--muted);border-top:1px dashed var(--border);padding-top:8px}
+  .gd4-gpuOverkill{background:color-mix(in srgb, #ef4444 15%, var(--bg));border:1.5px solid #ef4444;color:#ef4444;border-radius:8px;padding:9px 12px;font-size:12px;max-width:460px;margin:0 auto 12px}
+  .gd4-optimalBox{margin-top:8px;font-size:12px;line-height:1.6;background:var(--bg);border:1px dashed var(--border);border-radius:8px;padding:8px 12px}
 
   .gd4-briefHead{display:flex;gap:12px;align-items:center;margin:8px 0 12px}
   .gd4-briefGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px 20px;text-align:left}
@@ -647,30 +737,52 @@ function css() {
   .gd4-bonusCard{display:flex;flex-direction:column;align-items:center;gap:3px;border:1.5px solid color-mix(in srgb, var(--accent) 55%, var(--border));border-radius:8px;background:var(--bg);padding:6px 8px;min-width:78px}
   .gd4-bonusName{font-size:9.5px;font-weight:700;text-align:center}
 
-  .gd4-slotsGrid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
-  .gd4-slotsGrid:has(> :nth-child(6)){grid-template-columns:repeat(6,1fr)}
-  .gd4-slotsGrid:has(> :nth-child(4)):not(:has(> :nth-child(5))){grid-template-columns:repeat(4,1fr)}
-  @media(max-width:640px){.gd4-slotsGrid{grid-template-columns:repeat(2,1fr)!important}}
-  .gd4-slot,.gd4-cardFace{border:2px solid var(--border);border-radius:10px;background:var(--bg);padding:8px 5px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:3px;min-height:88px;justify-content:center;cursor:pointer}
+  .gd4-buildZone{background:var(--surface);border:1.5px dashed var(--primary);border-radius:10px;box-shadow:3px 3px 0 var(--shadow);padding:12px}
+  .gd4-buildRow{display:flex;flex-wrap:wrap;gap:10px;min-height:128px}
+  .gd4-buildEmpty{flex:1;display:flex;align-items:center;justify-content:center;min-height:128px;color:var(--muted);font-size:12px;border:1.5px dashed var(--border);border-radius:10px}
+  .gd4-slot,.gd4-cardFace{border:2px solid var(--border);border-radius:12px;background:var(--bg);padding:14px 8px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:5px;min-height:128px;justify-content:center;cursor:pointer;position:relative}
   .gd4-cardFace{border-color:var(--primary);box-shadow:2px 2px 0 var(--shadow)}
-  .gd4-cardFace.sm,.gd4-slot.sm{min-height:78px;padding:6px 4px}
-  .gd4-cardIconWrap{height:36px;display:flex;align-items:center}
-  .gd4-cardName{font-size:10px;font-weight:700}
-  .gd4-cardType{font-size:8.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
-  .gd4-slotType{font-size:8.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+  .gd4-cardFace.sm,.gd4-slot.sm{min-height:112px;padding:10px 6px}
+  .gd4-cardFace.selected{border-color:#ef4444;box-shadow:2px 2px 0 #ef4444;background:color-mix(in srgb, #ef4444 10%, var(--bg))}
+  .gd4-cardInfo{position:absolute;top:-8px;right:-8px;z-index:2;width:19px;height:19px;border-radius:50%;border:1.5px solid var(--primary);background:var(--bg);color:var(--primary);font:italic 700 11px Georgia,serif;line-height:1;padding:0;display:flex;align-items:center;justify-content:center;cursor:help}
+  .gd4-cardIconWrap{height:48px;display:flex;align-items:center}
+  .gd4-cardName{font-size:12px;font-weight:700}
+  .gd4-cardType{font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+  .gd4-slotType{font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+
+  .gd4-cardTip{position:fixed;z-index:60;max-width:230px;background:var(--surface);color:var(--text);border:1.5px solid var(--primary);border-radius:9px;box-shadow:4px 4px 0 var(--shadow);padding:9px 11px;font-size:11px;line-height:1.5;text-align:left;pointer-events:none}
+  .gd4-cardTipName{font-weight:700;margin-bottom:3px}
+  .gd4-cardTipStat{color:var(--muted);margin-bottom:4px}
+  .gd4-cardTipSlot{margin-bottom:4px}
+  .gd4-cardTipFlavor{color:var(--accent);margin-bottom:4px}
+  .gd4-cardTipEff{font-weight:700;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em}
+  .gd4-cardTipEff.good{color:#16a34a}
+  .gd4-cardTipEff.ok{color:#d97706}
+  .gd4-cardTipEff.meh{color:var(--muted)}
 
   .gd4-actionsRow{display:flex;gap:10px;flex-wrap:wrap}
+  .gd4-btn.danger{border-color:#ef4444;color:#ef4444}
+  .gd4-btn.danger:disabled{opacity:.35}
 
   .gd4-handWrap{background:var(--surface);border:1.5px solid var(--border);border-radius:10px;box-shadow:3px 3px 0 var(--shadow);padding:12px}
   .gd4-netHead{font-size:11px;letter-spacing:.06em;color:var(--muted);margin-bottom:8px}
-  .gd4-hand{display:flex;gap:8px;flex-wrap:wrap}
+  .gd4-hand{display:flex;gap:10px;flex-wrap:wrap}
   .gd4-handCard{position:relative;animation:gd4deal .35s ease}
   @keyframes gd4deal{from{transform:translateY(14px) scale(.9);opacity:0}to{transform:none;opacity:1}}
   @media(prefers-reduced-motion:reduce){.gd4-handCard{animation:none}}
-  .gd4-discardX{position:absolute;top:-7px;right:-7px;width:18px;height:18px;border-radius:50%;border:1.5px solid var(--border);background:var(--bg);font-size:9px;line-height:1;padding:0}
+  .gd4-runTipWrap{position:relative;display:inline-block}
+  .gd4-runTip{position:absolute;left:50%;bottom:calc(100% + 8px);transform:translateX(-50%);white-space:nowrap;background:var(--surface);color:var(--text);border:1.5px solid var(--primary);border-radius:8px;box-shadow:3px 3px 0 var(--shadow);padding:7px 10px;font-size:11px;opacity:0;pointer-events:none;transition:opacity .12s;z-index:20}
+  .gd4-runTipWrap:hover .gd4-runTip{opacity:1}
 
   .gd4-runBox{background:var(--surface);border:1.5px solid var(--border);border-radius:10px;box-shadow:3px 3px 0 var(--shadow);padding:14px;position:relative;overflow:hidden}
   .gd4-runBox::after{content:'';position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,color-mix(in srgb, var(--text) 3%, transparent) 0 1px,transparent 1px 3px)}
+  .gd4-runLayout{display:grid;grid-template-columns:1fr 1.3fr;gap:14px;align-items:stretch}
+  @media(max-width:760px){.gd4-runLayout{grid-template-columns:1fr}}
+  .gd4-runLog{background:var(--surface);border:1.5px solid var(--border);border-radius:10px;box-shadow:3px 3px 0 var(--shadow);padding:12px;max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:5px}
+  .gd4-runLogLine{font-size:11.5px;color:var(--muted);border-bottom:1px dashed var(--border);padding-bottom:5px;animation:gd4deal .25s ease}
+  .gd4-runLogLine:last-child{color:var(--text);font-weight:600}
+  .gd4-runPlot{background:var(--surface);border:1.5px solid var(--border);border-radius:10px;box-shadow:3px 3px 0 var(--shadow);padding:14px;position:relative;overflow:hidden}
+  .gd4-runPlot::after{content:'';position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,color-mix(in srgb, var(--text) 3%, transparent) 0 1px,transparent 1px 3px)}
   .gd4-curveBox.glitch{animation:gd4shake .12s linear infinite}
   @keyframes gd4shake{0%{transform:translate(0,0)}25%{transform:translate(-2px,1px)}50%{transform:translate(2px,-1px)}75%{transform:translate(-1px,2px)}100%{transform:translate(0,0)}}
   .gd4-curveSvg{width:100%;height:200px;display:block}
