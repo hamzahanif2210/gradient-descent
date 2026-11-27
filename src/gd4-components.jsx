@@ -151,7 +151,14 @@ export function LossCurve({ curve, step, outcome }) {
         <path d={path("val")} className="gd4-valLine" fill="none" />
         {glitching && <text x={W / 2} y={H / 2} textAnchor="middle" className="gd4-glitchText">⚠ CUDA OUT OF MEMORY</text>}
       </svg>
-      <div className="gd4-curveLegend"><span className="gd4-legTrain">━ train loss</span><span className="gd4-legVal">┄ val loss</span></div>
+      <div className="gd4-curveLegend">
+        <span className="gd4-legTrain">━ Training loss</span>
+        <span className="gd4-legVal">┄ Validation loss</span>
+      </div>
+      <p className="gd4-curveCaption">
+        Training loss measures fit to seen data; validation loss measures performance on held-out data.
+        Overfitting occurs when training loss keeps falling while validation loss rises.
+      </p>
     </div>
   );
 }
