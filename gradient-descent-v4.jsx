@@ -32,6 +32,7 @@ function buildFreshRun(base) {
     deck, hand: [], usedPile: [], bonusDeck: [], lastSolvedLoadout: null,
     discardsUsed: 0, discardsMax: 3,
     built: [], gpuBoostArmed: false,
+    buildRefills: {},
     problemState: freshProblemState(),
     runAnim: null, lastRun: null, sessionOver: null, pendingShop: false, insightPeek: null, dealSeq: 0,
   };
@@ -190,9 +191,11 @@ export default function GradientDescentV4() {
       if (!gg || busyRef.current || gg.runAnim || gg.sessionOver) return gg;
       if (gg.built.length >= BUILD_MAX) return gg;
       const card = gg.hand.find(c => c.uid === uid); if (!card) return gg;
-      const hand = gg.hand.filter(c => c.uid !== uid);
-      let g2 = { ...gg, hand, built: [...gg.built, card] };
+      const priorState = { hand: [...gg.hand], deck: [...gg.deck] };
+      const handBeforeRefill = gg.hand.filter(c => c.uid !== uid);
+      let g2 = { ...gg, hand: handBeforeRefill, built: [...gg.built, card] };
       g2 = dealUpTo(g2);
+      g2.buildRefills = { ...(g2.buildRefills || {}), [card.uid]: priorState };
       g2 = checkMillOut(g2);
       return g2;
     });
@@ -201,7 +204,19 @@ export default function GradientDescentV4() {
     setG(gg => {
       if (!gg || busyRef.current || gg.runAnim) return gg;
       const card = gg.built.find(c => c.uid === uid); if (!card) return gg;
-      return { ...gg, built: gg.built.filter(c => c.uid !== uid), hand: [...gg.hand, card] };
+      const buildRefills = { ...(gg.buildRefills || {}) };
+      const priorState = buildRefills[uid];
+      delete buildRefills[uid];
+      if (!priorState) {
+        return { ...gg, built: gg.built.filter(c => c.uid !== uid), hand: [...gg.hand, card], buildRefills };
+      }
+      return {
+        ...gg,
+        built: gg.built.filter(c => c.uid !== uid),
+        hand: [...priorState.hand],
+        deck: [...priorState.deck],
+        buildRefills,
+      };
     });
   }
   function toggleDiscSel(uid) {
