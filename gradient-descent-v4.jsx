@@ -32,7 +32,6 @@ function buildFreshRun(base) {
     deck, hand: [], usedPile: [], bonusDeck: [], lastSolvedLoadout: null,
     discardsUsed: 0, discardsMax: 3,
     built: [], gpuBoostArmed: false,
-    buildRefills: {},
     problemState: freshProblemState(),
     runAnim: null, lastRun: null, sessionOver: null, pendingShop: false, insightPeek: null, dealSeq: 0,
   };
@@ -62,6 +61,36 @@ function dealUpTo(gg, capOverride = null) {
       if (hand.length > cap) {
         const overflow = hand.pop();
         deck.unshift(overflow);
+      }
+    }
+  }
+  const problem = PROBLEMS[gg.problemIndex];
+  if (problem) {
+    const supportedModel = card => card.slotType === "model" &&
+      (problem.bestFit.includes(card.id) || (problem.okFit || []).includes(card.id));
+    const validLoss = card => card.slotType === "loss" && problem.validLoss.includes(card.id);
+    for (const [isSuitable, slotType] of [[supportedModel, "model"], [validLoss, "loss"]]) {
+      if (hand.some(isSuitable)) continue;
+      const candidateIndex = deck.findIndex(isSuitable);
+      if (candidateIndex < 0) continue;
+      const [candidate] = deck.splice(candidateIndex, 1);
+      const replaceIndex = hand.findIndex(card => {
+        if (supportedModel(card) || validLoss(card)) return false;
+        if (card.slotType === slotType) return true;
+        if (requiredTypes.includes(card.slotType)) {
+          return hand.filter(other => other.slotType === card.slotType).length > 1;
+        }
+        return true;
+      });
+      if (replaceIndex >= 0) {
+        const [replaced] = hand.splice(replaceIndex, 1, candidate);
+        deck.unshift(replaced);
+      } else {
+        hand.push(candidate);
+        if (hand.length > cap) {
+          const overflow = hand.pop();
+          deck.unshift(overflow);
+        }
       }
     }
   }
@@ -191,15 +220,8 @@ export default function GradientDescentV4() {
       if (!gg || busyRef.current || gg.runAnim || gg.sessionOver) return gg;
       if (gg.built.length >= BUILD_MAX) return gg;
       const card = gg.hand.find(c => c.uid === uid); if (!card) return gg;
-      const priorHandIds = new Set(gg.hand.map(c => c.uid));
       const handBeforeRefill = gg.hand.filter(c => c.uid !== uid);
       let g2 = { ...gg, hand: handBeforeRefill, built: [...gg.built, card] };
-      g2 = dealUpTo(g2);
-      const drawnCard = g2.hand.find(c => !priorHandIds.has(c.uid));
-      g2.buildRefills = {
-        ...(g2.buildRefills || {}),
-        [card.uid]: drawnCard ? { uid: drawnCard.uid, card: drawnCard } : null,
-      };
       g2 = checkMillOut(g2);
       return g2;
     });
@@ -208,24 +230,10 @@ export default function GradientDescentV4() {
     setG(gg => {
       if (!gg || busyRef.current || gg.runAnim) return gg;
       const card = gg.built.find(c => c.uid === uid); if (!card) return gg;
-      const buildRefills = { ...(gg.buildRefills || {}) };
-      const refill = buildRefills[uid];
-      delete buildRefills[uid];
-      let hand = [...gg.hand];
-      let deck = [...gg.deck];
-      if (refill) {
-        const refillIndex = hand.findIndex(c => c.uid === refill.uid);
-        if (refillIndex >= 0) {
-          const [drawnCard] = hand.splice(refillIndex, 1);
-          deck = [drawnCard, ...deck];
-        }
-      }
       return {
         ...gg,
         built: gg.built.filter(c => c.uid !== uid),
-        hand: [...hand, card],
-        deck,
-        buildRefills,
+        hand: [...gg.hand, card],
       };
     });
   }
@@ -372,6 +380,7 @@ export default function GradientDescentV4() {
   function advanceToNextProblem() {
     const gg = gRef.current; if (!gg) return;
     let g2 = { ...gg, problemIndex: gg.problemIndex + 1, lastRun: null, pendingShop: false, problemState: freshProblemState(), triesUsedThisProblem: 0, insightPeek: null };
+    g2 = dealUpTo(g2);
     // re-check mill-out against the RESET (five-slot) requirement — a four/six-slot
     // config on the just-solved problem could have masked an approaching mill-out.
     g2 = checkMillOut(g2);

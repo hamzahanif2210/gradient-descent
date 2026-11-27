@@ -21,7 +21,7 @@ Press **?** any time in-game to reopen the tutorial.
 
 ## Running it locally
 
-Requires [Node.js](https://nodejs.org/) (v18+) and npm.
+Requires [Node.js](https://nodejs.org/) (v20.19+ or v22.12+) and npm, matching the Vite version in the lockfile.
 
 ```bash
 cd gradient-descent
