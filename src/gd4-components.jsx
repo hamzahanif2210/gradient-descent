@@ -50,13 +50,13 @@ function cardFlavorText(card, type) {
 function effectivenessNote(card, type, problem) {
   if (!problem) return null;
   if (type === "model") {
-    if (problem.bestFit.includes(card.id)) return { text: "Effective for this problem", cls: "good" };
-    if (problem.okFit && problem.okFit.includes(card.id)) return { text: "Decent fit for this problem", cls: "ok" };
+    if (problem.bestFit.includes(card.id)) return { text: "Reasoning cue: compare this architecture's assumptions with the data geometry.", cls: "good" };
+    if (problem.okFit && problem.okFit.includes(card.id)) return { text: "Reasoning cue: consider whether this representation fits the data structure.", cls: "ok" };
     return { text: "Untested / normal here", cls: "meh" };
   }
   if (type === "loss") {
-    if (problem.bestLoss === card.id) return { text: "Ideal loss for this problem", cls: "good" };
-    if (problem.validLoss.includes(card.id)) return { text: "Valid loss for this problem", cls: "ok" };
+    if (problem.bestLoss === card.id) return { text: "Strong target match — consider how this loss penalizes the kind of errors this problem makes.", cls: "good" };
+    if (problem.validLoss.includes(card.id)) return { text: "Reasonable target match — check whether error scale and class balance align with this loss.", cls: "ok" };
     return { text: "Untested / normal here", cls: "meh" };
   }
   if (type === "compute") {
