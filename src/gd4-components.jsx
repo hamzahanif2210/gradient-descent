@@ -266,12 +266,15 @@ export function BriefingModal({ problem, revealed, onClose }) {
         <div className="gd4-briefGrid">
           <div><b>The problem</b><p>{b.problem}</p></div>
           <div><b>The data</b><p>{b.data}</p></div>
+          <div><b>Dataset size</b><p>{problem.datasetSize}</p></div>
+          <div><b>Target variable</b><p>{problem.targetVariable}</p></div>
+          <div><b>Evaluation metric</b><p>{problem.evaluationMetric}</p></div>
           <div><b>Why it's hard</b><p>{b.hard}</p></div>
           <div><b>A nudge</b><p>{b.nudge}</p></div>
           <div><b>Real-world impact</b><p>{b.impact}</p></div>
         </div>
         {revealed && <p className="gd4-reveal">🔭 Peer Review: the ideal model family here is <b>{problem.bestFit.map(id => MODELS.find(m => m.id === id).name).join(" or ")}</b>.</p>}
-        <div className="gd4-targetRow">Target: beat <b>{problem.target} {problem.metricLabel}</b> on validation.</div>
+        <div className="gd4-targetRow">A held-out validation split is used. Target: beat <b>{problem.target} {problem.metricLabel}</b> on validation.</div>
         <button className="gd4-btn primary" onClick={onClose}>Close</button>
       </div>
     </div>
@@ -298,9 +301,13 @@ export function NotebookModal({ notebookUnlocked, onClose }) {
                 <h3>{p.title}</h3>
                 <p><b>The problem</b><br />{b.problem}</p>
                 <p><b>The data</b><br />{b.data}</p>
+                <p><b>Dataset size</b><br />{p.datasetSize}</p>
+                <p><b>Target variable</b><br />{p.targetVariable}</p>
+                <p><b>Evaluation metric</b><br />{p.evaluationMetric}</p>
                 <p><b>Why it's hard</b><br />{b.hard}</p>
                 <p><b>A nudge</b><br />{b.nudge}</p>
                 <p><b>Real-world impact</b><br />{b.impact}</p>
+                <p><b>Validation</b><br />A held-out validation split is used.</p>
               </>);
             })() : <div className="gd4-dim">Pick an unlocked page.</div>}
           </div>
