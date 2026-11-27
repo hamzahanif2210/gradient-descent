@@ -210,10 +210,14 @@ export default function GradientDescentV4() {
       if (!priorState) {
         return { ...gg, built: gg.built.filter(c => c.uid !== uid), hand: [...gg.hand, card], buildRefills };
       }
+      const remainingBuiltIds = new Set(
+        gg.built.filter(c => c.uid !== uid).map(c => c.uid)
+      );
+      const restoredHand = priorState.hand.filter(c => !remainingBuiltIds.has(c.uid));
       return {
         ...gg,
         built: gg.built.filter(c => c.uid !== uid),
-        hand: [...priorState.hand],
+        hand: [...restoredHand],
         deck: [...priorState.deck],
         buildRefills,
       };
