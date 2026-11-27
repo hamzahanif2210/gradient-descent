@@ -43,6 +43,27 @@ function dealUpTo(gg, capOverride = null) {
   const cap = capOverride != null ? capOverride : HAND_MAX;
   let deck = [...gg.deck], hand = [...gg.hand];
   while (hand.length < cap && deck.length > 0) hand.push(deck.shift());
+  const requiredTypes = ["model", "activation", "loss"];
+  for (const requiredType of requiredTypes) {
+    if (hand.some(card => card.slotType === requiredType)) continue;
+    const candidateIndex = deck.findIndex(card => card.slotType === requiredType);
+    if (candidateIndex < 0) continue;
+    const [candidate] = deck.splice(candidateIndex, 1);
+    const replaceIndex = hand.findIndex(card => {
+      if (!requiredTypes.includes(card.slotType)) return true;
+      return hand.filter(other => other.slotType === card.slotType).length > 1;
+    });
+    if (replaceIndex >= 0) {
+      const [replaced] = hand.splice(replaceIndex, 1, candidate);
+      deck.unshift(replaced);
+    } else {
+      hand.push(candidate);
+      if (hand.length > cap) {
+        const overflow = hand.pop();
+        deck.unshift(overflow);
+      }
+    }
+  }
   return { ...gg, deck, hand };
 }
 
