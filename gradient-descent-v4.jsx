@@ -191,11 +191,15 @@ export default function GradientDescentV4() {
       if (!gg || busyRef.current || gg.runAnim || gg.sessionOver) return gg;
       if (gg.built.length >= BUILD_MAX) return gg;
       const card = gg.hand.find(c => c.uid === uid); if (!card) return gg;
-      const priorState = { hand: [...gg.hand], deck: [...gg.deck] };
+      const priorHandIds = new Set(gg.hand.map(c => c.uid));
       const handBeforeRefill = gg.hand.filter(c => c.uid !== uid);
       let g2 = { ...gg, hand: handBeforeRefill, built: [...gg.built, card] };
       g2 = dealUpTo(g2);
-      g2.buildRefills = { ...(g2.buildRefills || {}), [card.uid]: priorState };
+      const drawnCard = g2.hand.find(c => !priorHandIds.has(c.uid));
+      g2.buildRefills = {
+        ...(g2.buildRefills || {}),
+        [card.uid]: drawnCard ? { uid: drawnCard.uid, card: drawnCard } : null,
+      };
       g2 = checkMillOut(g2);
       return g2;
     });
@@ -205,20 +209,22 @@ export default function GradientDescentV4() {
       if (!gg || busyRef.current || gg.runAnim) return gg;
       const card = gg.built.find(c => c.uid === uid); if (!card) return gg;
       const buildRefills = { ...(gg.buildRefills || {}) };
-      const priorState = buildRefills[uid];
+      const refill = buildRefills[uid];
       delete buildRefills[uid];
-      if (!priorState) {
-        return { ...gg, built: gg.built.filter(c => c.uid !== uid), hand: [...gg.hand, card], buildRefills };
+      let hand = [...gg.hand];
+      let deck = [...gg.deck];
+      if (refill) {
+        const refillIndex = hand.findIndex(c => c.uid === refill.uid);
+        if (refillIndex >= 0) {
+          const [drawnCard] = hand.splice(refillIndex, 1);
+          deck = [drawnCard, ...deck];
+        }
       }
-      const remainingBuiltIds = new Set(
-        gg.built.filter(c => c.uid !== uid).map(c => c.uid)
-      );
-      const restoredHand = priorState.hand.filter(c => !remainingBuiltIds.has(c.uid));
       return {
         ...gg,
         built: gg.built.filter(c => c.uid !== uid),
-        hand: [...restoredHand],
-        deck: [...priorState.deck],
+        hand: [...hand, card],
+        deck,
         buildRefills,
       };
     });
