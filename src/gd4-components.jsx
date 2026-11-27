@@ -101,6 +101,7 @@ export function CardFace({ card, type, size = "md", onClick, draggable, onDragSt
         <div className="gd4-cardTip" style={{ left: pos.x + 16, top: pos.y + 16 }} onMouseMove={e => e.stopPropagation()}>
           <div className="gd4-cardTipName">{card.name}{card.tier != null ? <span className="gd4-tiny"> · tier {card.tier}</span> : null}</div>
           <div className="gd4-cardTipStat">{card.tip}</div>
+          {card.whatChanges && <div className="gd4-cardTipFlavor"><b>What it changes:</b> {card.whatChanges}</div>}
           <div className="gd4-cardTipSlot">{SLOT_DESC[type] || SLOT_DESC[card.slotType]}</div>
           {flavor && <div className="gd4-cardTipFlavor">{flavor}</div>}
           {eff && <div className={"gd4-cardTipEff " + eff.cls}>{eff.text}</div>}

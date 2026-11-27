@@ -38,6 +38,7 @@ export const SLOT_LABEL = { model: "Model", compute: "Compute", activation: "Act
 
 export const MODELS = [
   { id: "mlp", name: "MLP", icon: "mlp", tip: "Stacks of dense layers. The right default for tables of numbers." },
+  { id: "mamba", name: "Mamba", icon: "rnn", tip: "A selective state-space model for sequence processing.", whatChanges: "Replaces attention-based sequence mixing with a selective state-space recurrence, improving efficiency on long sequences. The trade-off is that it changes how sequence context is retained and may be less flexible than attention for some tasks." },
   { id: "cnn", name: "CNN", icon: "cnn", tip: "Slides filters over a grid to find local patterns. Built for images." },
   { id: "cnn1d", name: "1D-CNN", icon: "cnn1d", tip: "A CNN that slides along a single time axis. Great for signals & time-series." },
   { id: "rnn", name: "RNN / LSTM", icon: "rnn", tip: "Reads a sequence step by step and remembers what it saw." },
@@ -45,6 +46,7 @@ export const MODELS = [
   { id: "gnn", name: "GNN", icon: "gnn", tip: "Passes messages along a graph of connected nodes." },
   { id: "unet", name: "U-Net", icon: "unet", tip: "A CNN that shrinks an image down, then rebuilds it. Pixel-perfect output." },
   { id: "cnn3d", name: "3D-CNN", icon: "cnn3d", tip: "A CNN with an extra spatial axis, for volumes instead of flat images." },
+  { id: "kan", name: "KAN", icon: "mlp", tip: "Uses learnable spline functions on network edges.", whatChanges: "Changes the network mechanism from fixed node activation functions to learnable edge functions, often expressed as splines. This can improve interpretability and low-parameter function fitting, but adds spline computation and optimization complexity." },
 ];
 export const COMPUTE = [
   { id: "cpu", name: "Laptop CPU", tier: 0, icon: "cpu", tip: "Free and always around. Struggles with anything heavy." },
@@ -67,6 +69,7 @@ export const LOSSES = [
 export const HELPERS = [
   { id: "aiscientist", name: "AI Scientist", icon: "aiscientist", tip: "Reveals this problem's ideal model family." },
   { id: "gradstudent", name: "Grad Student", icon: "gradstudent", tip: "A pair of hands — no direct scoring effect, just morale." },
+  { id: "lion", name: "Lion", icon: "norm", tip: "A memory-efficient optimizer using sign-based momentum updates.", whatChanges: "Changes the optimizer update rule to use the sign of a momentum mixture instead of Adam-style first- and second-moment state. It usually uses less optimizer memory, but can be more sensitive to learning-rate and hyperparameter choices." },
   { id: "dataaug", name: "Data Augmentation", icon: "dataaug", tip: "Synthesizes more training examples. Cuts overfitting risk." },
   { id: "dropout", name: "Dropout", icon: "dropout", tip: "Randomly mutes neurons while training. Cuts overfitting risk." },
   { id: "earlystop", name: "Early Stopping", icon: "earlystop", tip: "Stops training at the best epoch — the overfitting climb never happens." },
