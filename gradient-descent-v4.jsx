@@ -5,7 +5,7 @@ import {
   MODELS, PROBLEMS, difficultyTone, difficultyBrief, buildMainDeck, freshProblemState,
   BONUS_DEFS, makeBonusShop, solveReward, STARTING_COMPUTE, HAND_MAX,
   computeOutcome, makeCurve, outcomeLabel, verdictText, tickerText,
-  addBoardResult, TUTORIAL_V4, gpuComputeTier, gpuComputeLabel, optimalSuggestion,
+  addBoardResult, gpuComputeTier, gpuComputeLabel, optimalSuggestion,
 } from "./src/gd4-data.js";
 import {
   CardFace, LossCurve, Tutorial, LeaderboardPanel, FlavorCarousel,
@@ -534,7 +534,7 @@ export default function GradientDescentV4() {
   /* ---------- main game screen ---------- */
   const builtTypes = g.built.map(c => c.slotType);
   const canRun = builtTypes.includes("model") && builtTypes.includes("activation") && builtTypes.includes("loss");
-  const elapsed = g.mode === "speedrun" ? (now || Date.now()) - g.startedAt : null;
+  const elapsed = g.mode === "speedrun" ? Math.max(now - g.startedAt, 0) : null;
   const showEndCard = !g.runAnim && g.lastRun && !g.sessionOver;
 
   return (
