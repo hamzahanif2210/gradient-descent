@@ -439,6 +439,9 @@ export default function GradientDescentV4() {
   }
 
   const problem = PROBLEMS[g.problemIndex];
+  const helperRevealActive =
+    g.problemState.revealed ||
+    g.built.some(card => card.slotType === "helper" && card.id === "aiscientist");
 
   if (screen === "shop" && shop) {
     return (
@@ -524,8 +527,8 @@ export default function GradientDescentV4() {
               <button className="gd4-btn sm" style={{ marginLeft: "auto" }} onClick={() => setModal("briefing")}>Full briefing</button>
             </div>
             {problem.why && <p className="gd4-why">{problem.why}</p>}
-            {g.problemState.revealed && (
-              <p className="gd4-reveal">🔭 Peer Review: the ideal model family here is <b>{problem.bestFit.map(id => MODELS.find(m => m.id === id).name).join(" or ")}</b>.</p>
+            {helperRevealActive && (
+              <p className="gd4-reveal">🔭 {g.problemState.revealed ? "Peer Review" : "AI Scientist"}: the ideal model family here is <b>{problem.bestFit.map(id => MODELS.find(m => m.id === id).name).join(" or ")}</b>.</p>
             )}
             {g.problemState.slotConfig === "four" && <p className="gd4-tiny">Helper slot skipped this problem (−1 Slot bonus).</p>}
             {g.problemState.slotConfig === "six" && <p className="gd4-tiny">A 2nd Helper slot is active this problem (+1 Slot bonus).</p>}
@@ -632,7 +635,7 @@ export default function GradientDescentV4() {
       {tut !== null && <Tutorial step={tut} setStep={setTut} />}
       {modal === "notebook" && <NotebookModal notebookUnlocked={g.notebookUnlocked} onClose={() => setModal(null)} />}
       {modal === "leaderboard" && <LeaderboardPanel flavorId={g.flavorId} onClose={() => setModal(null)} />}
-      {modal === "briefing" && <BriefingModal problem={problem} revealed={g.problemState.revealed} onClose={() => setModal(null)} />}
+      {modal === "briefing" && <BriefingModal problem={problem} revealed={helperRevealActive} onClose={() => setModal(null)} />}
     </div>
   );
 }
