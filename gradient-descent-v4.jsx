@@ -5,7 +5,7 @@ import {
   MODELS, PROBLEMS, difficultyTone, difficultyBrief, buildMainDeck, freshProblemState,
   BONUS_DEFS, makeBonusShop, solveReward, STARTING_COMPUTE, HAND_MAX,
   computeOutcome, makeCurve, outcomeLabel, verdictText, tickerText,
-  addBoardResult, TUTORIAL_V4, gpuComputeTier, gpuComputeLabel, optimalSuggestion,
+  addBoardResult, gpuComputeTier, gpuComputeLabel, optimalSuggestion,
 } from "./src/gd4-data.js";
 import {
   CardFace, LossCurve, Tutorial, LeaderboardPanel, FlavorCarousel,
@@ -43,6 +43,57 @@ function dealUpTo(gg, capOverride = null) {
   const cap = capOverride != null ? capOverride : HAND_MAX;
   let deck = [...gg.deck], hand = [...gg.hand];
   while (hand.length < cap && deck.length > 0) hand.push(deck.shift());
+  const requiredTypes = ["model", "activation", "loss"];
+  for (const requiredType of requiredTypes) {
+    if (hand.some(card => card.slotType === requiredType)) continue;
+    const candidateIndex = deck.findIndex(card => card.slotType === requiredType);
+    if (candidateIndex < 0) continue;
+    const [candidate] = deck.splice(candidateIndex, 1);
+    const replaceIndex = hand.findIndex(card => {
+      if (!requiredTypes.includes(card.slotType)) return true;
+      return hand.filter(other => other.slotType === card.slotType).length > 1;
+    });
+    if (replaceIndex >= 0) {
+      const [replaced] = hand.splice(replaceIndex, 1, candidate);
+      deck.unshift(replaced);
+    } else {
+      hand.push(candidate);
+      if (hand.length > cap) {
+        const overflow = hand.pop();
+        deck.unshift(overflow);
+      }
+    }
+  }
+  const problem = PROBLEMS[gg.problemIndex];
+  if (problem) {
+    const supportedModel = card => card.slotType === "model" &&
+      (problem.bestFit.includes(card.id) || (problem.okFit || []).includes(card.id));
+    const validLoss = card => card.slotType === "loss" && problem.validLoss.includes(card.id);
+    for (const [isSuitable, slotType] of [[supportedModel, "model"], [validLoss, "loss"]]) {
+      if (hand.some(isSuitable)) continue;
+      const candidateIndex = deck.findIndex(isSuitable);
+      if (candidateIndex < 0) continue;
+      const [candidate] = deck.splice(candidateIndex, 1);
+      const replaceIndex = hand.findIndex(card => {
+        if (supportedModel(card) || validLoss(card)) return false;
+        if (card.slotType === slotType) return true;
+        if (requiredTypes.includes(card.slotType)) {
+          return hand.filter(other => other.slotType === card.slotType).length > 1;
+        }
+        return true;
+      });
+      if (replaceIndex >= 0) {
+        const [replaced] = hand.splice(replaceIndex, 1, candidate);
+        deck.unshift(replaced);
+      } else {
+        hand.push(candidate);
+        if (hand.length > cap) {
+          const overflow = hand.pop();
+          deck.unshift(overflow);
+        }
+      }
+    }
+  }
   return { ...gg, deck, hand };
 }
 
@@ -169,9 +220,8 @@ export default function GradientDescentV4() {
       if (!gg || busyRef.current || gg.runAnim || gg.sessionOver) return gg;
       if (gg.built.length >= BUILD_MAX) return gg;
       const card = gg.hand.find(c => c.uid === uid); if (!card) return gg;
-      const hand = gg.hand.filter(c => c.uid !== uid);
-      let g2 = { ...gg, hand, built: [...gg.built, card] };
-      g2 = dealUpTo(g2);
+      const handBeforeRefill = gg.hand.filter(c => c.uid !== uid);
+      let g2 = { ...gg, hand: handBeforeRefill, built: [...gg.built, card] };
       g2 = checkMillOut(g2);
       return g2;
     });
@@ -180,7 +230,11 @@ export default function GradientDescentV4() {
     setG(gg => {
       if (!gg || busyRef.current || gg.runAnim) return gg;
       const card = gg.built.find(c => c.uid === uid); if (!card) return gg;
-      return { ...gg, built: gg.built.filter(c => c.uid !== uid), hand: [...gg.hand, card] };
+      return {
+        ...gg,
+        built: gg.built.filter(c => c.uid !== uid),
+        hand: [...gg.hand, card],
+      };
     });
   }
   function toggleDiscSel(uid) {
@@ -326,6 +380,7 @@ export default function GradientDescentV4() {
   function advanceToNextProblem() {
     const gg = gRef.current; if (!gg) return;
     let g2 = { ...gg, problemIndex: gg.problemIndex + 1, lastRun: null, pendingShop: false, problemState: freshProblemState(), triesUsedThisProblem: 0, insightPeek: null };
+    g2 = dealUpTo(g2);
     // re-check mill-out against the RESET (five-slot) requirement — a four/six-slot
     // config on the just-solved problem could have masked an approaching mill-out.
     g2 = checkMillOut(g2);
@@ -439,6 +494,9 @@ export default function GradientDescentV4() {
   }
 
   const problem = PROBLEMS[g.problemIndex];
+  const helperRevealActive =
+    g.problemState.revealed ||
+    g.built.some(card => card.slotType === "helper" && card.id === "aiscientist");
 
   if (screen === "shop" && shop) {
     return (
@@ -476,7 +534,7 @@ export default function GradientDescentV4() {
   /* ---------- main game screen ---------- */
   const builtTypes = g.built.map(c => c.slotType);
   const canRun = builtTypes.includes("model") && builtTypes.includes("activation") && builtTypes.includes("loss");
-  const elapsed = g.mode === "speedrun" ? (now || Date.now()) - g.startedAt : null;
+  const elapsed = g.mode === "speedrun" ? Math.max(now - g.startedAt, 0) : null;
   const showEndCard = !g.runAnim && g.lastRun && !g.sessionOver;
 
   return (
@@ -524,8 +582,8 @@ export default function GradientDescentV4() {
               <button className="gd4-btn sm" style={{ marginLeft: "auto" }} onClick={() => setModal("briefing")}>Full briefing</button>
             </div>
             {problem.why && <p className="gd4-why">{problem.why}</p>}
-            {g.problemState.revealed && (
-              <p className="gd4-reveal">🔭 Peer Review: the ideal model family here is <b>{problem.bestFit.map(id => MODELS.find(m => m.id === id).name).join(" or ")}</b>.</p>
+            {helperRevealActive && (
+              <p className="gd4-reveal">🔭 {g.problemState.revealed ? "Peer Review" : "AI Scientist"}: the ideal model family here is <b>{problem.bestFit.map(id => MODELS.find(m => m.id === id).name).join(" or ")}</b>.</p>
             )}
             {g.problemState.slotConfig === "four" && <p className="gd4-tiny">Helper slot skipped this problem (−1 Slot bonus).</p>}
             {g.problemState.slotConfig === "six" && <p className="gd4-tiny">A 2nd Helper slot is active this problem (+1 Slot bonus).</p>}
@@ -632,7 +690,7 @@ export default function GradientDescentV4() {
       {tut !== null && <Tutorial step={tut} setStep={setTut} />}
       {modal === "notebook" && <NotebookModal notebookUnlocked={g.notebookUnlocked} onClose={() => setModal(null)} />}
       {modal === "leaderboard" && <LeaderboardPanel flavorId={g.flavorId} onClose={() => setModal(null)} />}
-      {modal === "briefing" && <BriefingModal problem={problem} revealed={g.problemState.revealed} onClose={() => setModal(null)} />}
+      {modal === "briefing" && <BriefingModal problem={problem} revealed={helperRevealActive} onClose={() => setModal(null)} />}
     </div>
   );
 }

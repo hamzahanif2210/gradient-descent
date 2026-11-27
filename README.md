@@ -2,6 +2,8 @@
 
 An educational roguelike card game about how machine learning actually works — build tiny neural network "recipes" out of cards and train them against 10 real open-science problems, from Higgs boson detection to protein folding.
 
+**Live site:** https://hamzahanif2210.github.io/gradient-descent/
+
 You share one deck across the whole run: draw a hand, drag Model / Compute / Activation / Loss / Helper cards into your network, hit **Run**, and watch a live loss curve decide whether you solved the problem. Fail a Run and the whole attempt ends — permadeath, roguelike-style — so spend your compute wisely at the Grant Committee shop between problems.
 
 ## How to play
@@ -19,7 +21,7 @@ Press **?** any time in-game to reopen the tutorial.
 
 ## Running it locally
 
-Requires [Node.js](https://nodejs.org/) (v18+) and npm.
+Requires [Node.js](https://nodejs.org/) (v20.19+ or v22.12+) and npm, matching the Vite version in the lockfile.
 
 ```bash
 cd gradient-descent
@@ -42,4 +44,32 @@ npm run preview    # serve the production build locally
 - [src/gd4-data.js](src/gd4-data.js) — game data: models, problems, bonuses, scoring/outcome logic
 - [src/gd4-components.jsx](src/gd4-components.jsx) — shared UI pieces (cards, loss curve, modals, leaderboard)
 - [src/icons2.js](src/icons2.js) — icon sprites
-- `gradient-descent.jsx` / `gradient-descent-v3.jsx` — earlier prototype versions, kept for reference (not used by the live app)
+- `gradient-descent.jsx` / `gradient-descent-v3.jsx` — legacy prototypes kept for reference (not used by the live app)
+
+## How to add a new card or problem
+
+All live card and problem definitions are in [src/gd4-data.js](src/gd4-data.js). The live app reads this file through [gradient-descent-v4.jsx](gradient-descent-v4.jsx).
+
+### Adding a card
+
+Add the card to the appropriate exported pool:
+
+- `MODELS` for model/architecture cards
+- `COMPUTE` for hardware or compute cards
+- `ACTIVATIONS` for activation cards
+- `LOSSES` for loss-function cards
+- `HELPERS` for helper cards
+- `BONUS_DEFS` for one-time shop bonuses
+
+Card objects use fields such as `id`, `name`, `icon`, `tip`, and (when relevant) `slotType`, `tier`, or `whatChanges`. `slotType` is assigned when `buildMainDeck()` is built; card icons must exist in [src/icons2.js](src/icons2.js). A modern card can also include `whatChanges` for a one-or-two-sentence explanation of the mechanism and trade-off shown in the info tooltip.
+
+### Adding a problem
+
+Append a problem object to `PROBLEMS`. Keep a stable `id` and include:
+
+- `title`, `field`, `difficulty`, and `dataType`
+- `datasetSize`, `targetVariable`, and `evaluationMetric`
+- `why` and a `briefing` object containing `problem`, `data`, `hard`, `nudge`, and `impact`
+- `bestFit`, optional `okFit`, `validLoss`, optional `bestLoss`, `dataScale`, `minTier`, `target`, `metricLabel`, and `icon`
+
+The live game automatically includes the new object in the mission sequence and Notebook. Add or update the problem count in user-facing text (including the README) to match `PROBLEMS.length`, and test that at least one viable card set can solve it.

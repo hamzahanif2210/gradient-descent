@@ -38,6 +38,7 @@ export const SLOT_LABEL = { model: "Model", compute: "Compute", activation: "Act
 
 export const MODELS = [
   { id: "mlp", name: "MLP", icon: "mlp", tip: "Stacks of dense layers. The right default for tables of numbers." },
+  { id: "mamba", name: "Mamba", icon: "rnn", tip: "A selective state-space model for sequence processing.", whatChanges: "Replaces attention-based sequence mixing with a selective state-space recurrence, improving efficiency on long sequences. The trade-off is that it changes how sequence context is retained and may be less flexible than attention for some tasks." },
   { id: "cnn", name: "CNN", icon: "cnn", tip: "Slides filters over a grid to find local patterns. Built for images." },
   { id: "cnn1d", name: "1D-CNN", icon: "cnn1d", tip: "A CNN that slides along a single time axis. Great for signals & time-series." },
   { id: "rnn", name: "RNN / LSTM", icon: "rnn", tip: "Reads a sequence step by step and remembers what it saw." },
@@ -45,6 +46,7 @@ export const MODELS = [
   { id: "gnn", name: "GNN", icon: "gnn", tip: "Passes messages along a graph of connected nodes." },
   { id: "unet", name: "U-Net", icon: "unet", tip: "A CNN that shrinks an image down, then rebuilds it. Pixel-perfect output." },
   { id: "cnn3d", name: "3D-CNN", icon: "cnn3d", tip: "A CNN with an extra spatial axis, for volumes instead of flat images." },
+  { id: "kan", name: "KAN", icon: "mlp", tip: "Uses learnable spline functions on network edges.", whatChanges: "Changes the network mechanism from fixed node activation functions to learnable edge functions, often expressed as splines. This can improve interpretability and low-parameter function fitting, but adds spline computation and optimization complexity." },
 ];
 export const COMPUTE = [
   { id: "cpu", name: "Laptop CPU", tier: 0, icon: "cpu", tip: "Free and always around. Struggles with anything heavy." },
@@ -67,6 +69,7 @@ export const LOSSES = [
 export const HELPERS = [
   { id: "aiscientist", name: "AI Scientist", icon: "aiscientist", tip: "Reveals this problem's ideal model family." },
   { id: "gradstudent", name: "Grad Student", icon: "gradstudent", tip: "A pair of hands — no direct scoring effect, just morale." },
+  { id: "lion", name: "Lion", icon: "norm", tip: "A memory-efficient optimizer using sign-based momentum updates.", whatChanges: "Changes the optimizer update rule to use the sign of a momentum mixture instead of Adam-style first- and second-moment state. It usually uses less optimizer memory, but can be more sensitive to learning-rate and hyperparameter choices." },
   { id: "dataaug", name: "Data Augmentation", icon: "dataaug", tip: "Synthesizes more training examples. Cuts overfitting risk." },
   { id: "dropout", name: "Dropout", icon: "dropout", tip: "Randomly mutes neurons while training. Cuts overfitting risk." },
   { id: "earlystop", name: "Early Stopping", icon: "earlystop", tip: "Stops training at the best epoch — the overfitting climb never happens." },
@@ -79,7 +82,7 @@ export const DATA_SCALE_TIER = { tiny: 0, small: 0, medium: 1, large: 2 };
 
 /* ---------- the 10 real science problems, in unlock order ---------- */
 export const PROBLEMS = [
-  { id: "higgs", title: "Higgs ML Challenge", field: "Particle physics", difficulty: "Easy", dataType: "Tabular kinematic features",
+  { id: "higgs", title: "Higgs ML Challenge", field: "Particle physics", difficulty: "Easy", dataType: "Tabular kinematic features", datasetSize: "About 800,000 labeled collision events", targetVariable: "Whether a collision decay is Higgs signal or background", evaluationMetric: "AUC",
     why: "Every collision at the Large Hadron Collider produces a spray of particles, and only a tiny fraction are genuine Higgs boson decays — the rest just look like them. A model that can tell real signal from background noise saves physicists from combing through millions of events by hand. This exact challenge, run in 2014, is credited with pulling particle physics seriously into machine learning. It's a clean tabular problem: no images, no sequences, just measured numbers per collision.",
     bestFit: ["mlp"], okFit: ["gnn"], validLoss: ["xent", "focal"], bestLoss: "xent", dataScale: "large", minTier: 0, target: 76, metricLabel: "AUC",
     briefing: {
@@ -89,7 +92,7 @@ export const PROBLEMS = [
       nudge: "No pixels, no time axis — just a flat table of measurements per event.",
       impact: "This exact challenge (Higgs ML, 2014) shaped how particle physics adopted machine learning for the LHC.",
     }, icon: "higgs" },
-  { id: "molecular", title: "Molecular Property (ESOL / Tox21)", field: "Chemistry", difficulty: "Easy/Med", dataType: "SMILES strings",
+  { id: "molecular", title: "Molecular Property (ESOL / Tox21)", field: "Chemistry", difficulty: "Easy/Med", dataType: "SMILES strings", datasetSize: "Several thousand molecules", targetVariable: "Water solubility or binary molecular toxicity", evaluationMetric: "R² for solubility / AUC for toxicity",
     why: "Synthesizing and testing a new molecule in a lab is slow and expensive, so chemists want to know its solubility or toxicity before they ever make it. Machine learning lets you predict those properties straight from the molecule's structure, screening thousands of candidates in seconds. The tricky part is that the same atoms arranged differently can behave completely differently, so the model has to learn real structure, not just count atoms. This is a genuine part of modern drug and materials discovery pipelines today.",
     bestFit: ["mlp", "gnn"], validLoss: ["mse", "xent", "focal"], dataScale: "medium", minTier: 0, target: 78, metricLabel: "R² / AUC",
     briefing: {
@@ -99,7 +102,7 @@ export const PROBLEMS = [
       nudge: "A molecule can be flattened into descriptor numbers, or kept as the literal graph of atoms and bonds it actually is.",
       impact: "Cheaper property prediction means fewer molecules need to be physically synthesized and tested — a real part of modern drug and materials discovery.",
     }, icon: "molecular" },
-  { id: "climate", title: "Climate Pattern Detection (ClimateNet)", field: "Earth science", difficulty: "Med", dataType: "Gridded spatial data",
+  { id: "climate", title: "Climate Pattern Detection (ClimateNet)", field: "Earth science", difficulty: "Med", dataType: "Gridded spatial data", datasetSize: "Large collections of gridded simulation snapshots", targetVariable: "Presence and location of atmospheric rivers or cyclones", evaluationMetric: "Intersection-over-Union (IoU)",
     why: "Climate simulations produce decades of gridded weather data — far too much for a human to scan by eye for atmospheric rivers and cyclones. A model that treats each snapshot like an image, with pressure and wind standing in for color channels, can pick out these patterns automatically. That matters because even human experts disagree on the exact boundary of a storm, so the model is learning a genuinely fuzzy target. Automating this lets scientists track how extreme weather frequency is shifting over long time spans.",
     bestFit: ["cnn", "unet"], validLoss: ["xent", "focal"], dataScale: "large", minTier: 1, target: 82, metricLabel: "IoU",
     briefing: {
@@ -109,7 +112,7 @@ export const PROBLEMS = [
       nudge: "This is fundamentally a picture — just with weather variables standing in for color channels.",
       impact: "Better automatic detection lets climate scientists track how extreme weather frequency is changing over decades of data.",
     }, icon: "climate" },
-  { id: "jet", title: "Jet Classification", field: "Particle physics", difficulty: "Hard", dataType: "Detector images/features",
+  { id: "jet", title: "Jet Classification", field: "Particle physics", difficulty: "Hard", dataType: "Detector images/features", datasetSize: "Large public jet datasets with hundreds of thousands to millions of events", targetVariable: "The particle type that produced each jet", evaluationMetric: "Classification accuracy",
     why: "High-energy collisions spray out \"jets\" of secondary particles, and figuring out which fundamental particle started a given jet is central to searching for new physics at the LHC. A jet can be treated as an image of detector energy deposits or as a graph of the individual particles it contains — but a plain flat table misses the structure entirely. Different source particles can produce jets that look deceptively similar, so the differences the model has to learn are subtle and structural, not obvious. Jet tagging like this runs in real LHC analyses every day.",
     bestFit: ["cnn", "gnn"], validLoss: ["xent", "focal"], dataScale: "large", minTier: 2, target: 86, metricLabel: "Accuracy",
     briefing: {
@@ -119,7 +122,7 @@ export const PROBLEMS = [
       nudge: "Whether you treat it as an image or as a set of connected particles, an order-independent flat table misses the structure.",
       impact: "Jet tagging like this is used daily in real LHC analyses to search for new physics.",
     }, icon: "jet" },
-  { id: "exoplanet", title: "Exoplanet Detection", field: "Astronomy", difficulty: "Easy/Med", dataType: "1D light-curve time-series",
+  { id: "exoplanet", title: "Exoplanet Detection", field: "Astronomy", difficulty: "Easy/Med", dataType: "1D light-curve time-series", datasetSize: "Tens of thousands of labeled stellar light curves", targetVariable: "Whether a star's curve contains a planet transit", evaluationMetric: "Recall",
     why: "A planet crossing in front of its star dims that star's light by a fraction of a percent for a few hours — too subtle and too rare for a human to spot across millions of stars. ML models scan the brightness-over-time curve of every star and flag the faint dips that look like a transit. This is exactly how real missions like Kepler and TESS have confirmed thousands of exoplanets. Since it's one long strip of numbers over time, this is a natural fit for models built to read sequences.",
     bestFit: ["cnn1d", "rnn"], validLoss: ["xent", "focal"], bestLoss: "focal", dataScale: "medium", minTier: 0, target: 80, metricLabel: "Recall",
     briefing: {
@@ -129,7 +132,7 @@ export const PROBLEMS = [
       nudge: "This is a single long strip of numbers over time, not a 2-D image.",
       impact: "This is how missions like Kepler and TESS have found thousands of real exoplanets.",
     }, icon: "exoplanet" },
-  { id: "genomics", title: "Gene Expression / Cancer Subtype (TCGA)", field: "Biology/Medicine", difficulty: "Med", dataType: "High-dim tabular, tiny samples",
+  { id: "genomics", title: "Gene Expression / Cancer Subtype (TCGA)", field: "Biology/Medicine", difficulty: "Med", dataType: "High-dim tabular, tiny samples", datasetSize: "A few hundred patient samples", targetVariable: "Cancer subtype from gene-expression measurements", evaluationMetric: "Classification accuracy",
     why: "Knowing a tumor's cancer subtype from its gene activity can directly guide which treatment a patient gets. The catch: each patient row has around 20,000 gene measurements but there may be only a few hundred patients total, so a hungry model can \"memorize\" the training set and still know nothing real about new patients. The skill this problem tests isn't picking a fancy architecture — it's keeping the model humble enough to generalize. Gene-expression subtyping like this, based on real TCGA research, already informs actual clinical treatment decisions.",
     bestFit: ["mlp"], validLoss: ["xent"], dataScale: "tiny", minTier: 0, overfitTrap: true, target: 83, metricLabel: "Accuracy",
     briefing: {
@@ -139,7 +142,7 @@ export const PROBLEMS = [
       nudge: "It's still a flat table of numbers per patient — the challenge isn't the architecture, it's keeping the model humble.",
       impact: "Gene-expression subtyping (as in real TCGA research) already informs which cancer treatments are likely to work for a given patient.",
     }, icon: "genomics" },
-  { id: "gravwave", title: "Gravitational Wave Detection (G2Net)", field: "Physics", difficulty: "Med/Hard", dataType: "Noisy strain → spectrogram",
+  { id: "gravwave", title: "Gravitational Wave Detection (G2Net)", field: "Physics", difficulty: "Med/Hard", dataType: "Noisy strain → spectrogram", datasetSize: "Large sets of simulated and detector-noise time windows", targetVariable: "Whether a time window contains a gravitational-wave signal", evaluationMetric: "AUC",
     why: "Colliding black holes send ripples through spacetime, but by the time they reach Earth the signal is a thousand times quieter than the instrument's own noise. Turning the raw strain measurement into a time-vs-frequency spectrogram makes the telltale rising \"chirp\" something a vision-style model can actually see. This is the real detection pipeline behind LIGO and Virgo's confirmed discoveries — and it's a genuinely hard needle-in-haystack search, since noise alone can mimic the shape of a real signal.",
     bestFit: ["cnn"], okFit: ["cnn1d"], validLoss: ["xent", "focal"], bestLoss: "focal", dataScale: "large", minTier: 1, target: 85, metricLabel: "AUC",
     briefing: {
@@ -149,7 +152,7 @@ export const PROBLEMS = [
       nudge: "Once you turn the signal into a time-vs-frequency picture, the telltale 'chirp' becomes something you can see.",
       impact: "This is the real detection pipeline behind LIGO/Virgo's confirmed gravitational wave discoveries.",
     }, icon: "gravwave" },
-  { id: "neutrino", title: "Neutrino Event Classification (IceCube)", field: "Particle physics", difficulty: "Hard", dataType: "Detector data (different geometry)",
+  { id: "neutrino", title: "Neutrino Event Classification (IceCube)", field: "Particle physics", difficulty: "Hard", dataType: "Detector data (different geometry)", datasetSize: "Large detector-event datasets with many simulated background events", targetVariable: "Whether a sensor-hit pattern is neutrino signal or cosmic-ray background", evaluationMetric: "AUC",
     why: "IceCube buries thousands of light sensors deep in Antarctic ice, waiting for the faint flash a neutrino leaves as it passes through — against a constant flood of ordinary cosmic-ray muons that look similar. The sensors aren't arranged in a neat camera grid, they're a large, sparse, irregular 3-D array, so this needs a model built for that kind of structure rather than a standard image model. Genuine neutrino events are a tiny minority of all hits, so the loss function has to avoid just learning to predict \"background\" every time. IceCube's real detections have opened a new window onto extreme cosmic events like black hole jets and neutron star collisions.",
     bestFit: ["cnn", "gnn"], validLoss: ["focal", "xent"], bestLoss: "focal", dataScale: "large", minTier: 2, target: 87, metricLabel: "AUC",
     briefing: {
@@ -159,7 +162,7 @@ export const PROBLEMS = [
       nudge: "This needs a model built for irregular structure — and a loss that doesn't just learn to predict 'background' every time.",
       impact: "IceCube's real detections opened a new window onto extreme cosmic events like black hole jets and neutron star collisions.",
     }, icon: "neutrino" },
-  { id: "cosmology", title: "Cosmological Parameter Estimation (Quijote)", field: "Cosmology", difficulty: "Hard", dataType: "3D density fields",
+  { id: "cosmology", title: "Cosmological Parameter Estimation (Quijote)", field: "Cosmology", difficulty: "Hard", dataType: "3D density fields", datasetSize: "Thousands of 3-D cosmological simulation boxes", targetVariable: "Cosmological parameters such as matter density", evaluationMetric: "R²",
     why: "Simulations like Quijote produce a 3-D snapshot of how matter clumps together across a slice of the universe, and from that clumping pattern you can estimate the underlying physical constants that produced it — like the total matter density. The relationship between subtle clumping and those parameters is complex and highly nonlinear, and critically, this data has real depth as well as height and width, so a model built only for flat images is missing a whole dimension. Models trained on simulations like this genuinely help cosmologists interpret real telescope surveys of the universe's large-scale structure.",
     bestFit: ["cnn3d"], validLoss: ["mse"], bestLoss: "mse", dataScale: "large", minTier: 2, target: 88, metricLabel: "R²",
     briefing: {
@@ -169,7 +172,7 @@ export const PROBLEMS = [
       nudge: "This data has depth as well as height and width — a model built for flat images is missing a whole dimension.",
       impact: "Simulations like Quijote and models trained on them help cosmologists interpret real telescope surveys of the universe's structure.",
     }, icon: "cosmology" },
-  { id: "protein", title: "Protein Structure / Function", field: "Biology", difficulty: "Hard", dataType: "Amino-acid sequences",
+  { id: "protein", title: "Protein Structure / Function", field: "Biology", difficulty: "Hard", dataType: "Amino-acid sequences", datasetSize: "Large public protein databases with tens to hundreds of thousands of sequences", targetVariable: "Protein structural or functional class", evaluationMetric: "Classification accuracy",
     why: "A protein's function comes from how its chain of amino acids folds into a 3-D shape, and predicting that structure or function straight from the sequence is a huge head start over slow lab experiments. Sequences are read in order, one position after another, much like a sentence in a language — but positions that are far apart in the sequence can end up right next to each other once the chain folds, which is what makes this genuinely hard. This is the exact problem AlphaFold tackled, and solving it well transformed structural biology practically overnight.",
     bestFit: ["rnn", "transformer"], validLoss: ["xent", "contrastive"], dataScale: "large", minTier: 2, target: 90, metricLabel: "Accuracy",
     briefing: {

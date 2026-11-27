@@ -50,13 +50,13 @@ function cardFlavorText(card, type) {
 function effectivenessNote(card, type, problem) {
   if (!problem) return null;
   if (type === "model") {
-    if (problem.bestFit.includes(card.id)) return { text: "Effective for this problem", cls: "good" };
-    if (problem.okFit && problem.okFit.includes(card.id)) return { text: "Decent fit for this problem", cls: "ok" };
+    if (problem.bestFit.includes(card.id)) return { text: "Reasoning cue: compare this architecture's assumptions with the data geometry.", cls: "good" };
+    if (problem.okFit && problem.okFit.includes(card.id)) return { text: "Reasoning cue: consider whether this representation fits the data structure.", cls: "ok" };
     return { text: "Untested / normal here", cls: "meh" };
   }
   if (type === "loss") {
-    if (problem.bestLoss === card.id) return { text: "Ideal loss for this problem", cls: "good" };
-    if (problem.validLoss.includes(card.id)) return { text: "Valid loss for this problem", cls: "ok" };
+    if (problem.bestLoss === card.id) return { text: "Strong target match — consider how this loss penalizes the kind of errors this problem makes.", cls: "good" };
+    if (problem.validLoss.includes(card.id)) return { text: "Reasonable target match — check whether error scale and class balance align with this loss.", cls: "ok" };
     return { text: "Untested / normal here", cls: "meh" };
   }
   if (type === "compute") {
@@ -101,6 +101,7 @@ export function CardFace({ card, type, size = "md", onClick, draggable, onDragSt
         <div className="gd4-cardTip" style={{ left: pos.x + 16, top: pos.y + 16 }} onMouseMove={e => e.stopPropagation()}>
           <div className="gd4-cardTipName">{card.name}{card.tier != null ? <span className="gd4-tiny"> · tier {card.tier}</span> : null}</div>
           <div className="gd4-cardTipStat">{card.tip}</div>
+          {card.whatChanges && <div className="gd4-cardTipFlavor"><b>What it changes:</b> {card.whatChanges}</div>}
           <div className="gd4-cardTipSlot">{SLOT_DESC[type] || SLOT_DESC[card.slotType]}</div>
           {flavor && <div className="gd4-cardTipFlavor">{flavor}</div>}
           {eff && <div className={"gd4-cardTipEff " + eff.cls}>{eff.text}</div>}
@@ -151,7 +152,14 @@ export function LossCurve({ curve, step, outcome }) {
         <path d={path("val")} className="gd4-valLine" fill="none" />
         {glitching && <text x={W / 2} y={H / 2} textAnchor="middle" className="gd4-glitchText">⚠ CUDA OUT OF MEMORY</text>}
       </svg>
-      <div className="gd4-curveLegend"><span className="gd4-legTrain">━ train loss</span><span className="gd4-legVal">┄ val loss</span></div>
+      <div className="gd4-curveLegend">
+        <span className="gd4-legTrain">━ Training loss</span>
+        <span className="gd4-legVal">┄ Validation loss</span>
+      </div>
+      <p className="gd4-curveCaption">
+        Training loss measures fit to seen data; validation loss measures performance on held-out data.
+        Overfitting occurs when training loss keeps falling while validation loss rises.
+      </p>
     </div>
   );
 }
@@ -266,12 +274,15 @@ export function BriefingModal({ problem, revealed, onClose }) {
         <div className="gd4-briefGrid">
           <div><b>The problem</b><p>{b.problem}</p></div>
           <div><b>The data</b><p>{b.data}</p></div>
+          <div><b>Dataset size</b><p>{problem.datasetSize}</p></div>
+          <div><b>Target variable</b><p>{problem.targetVariable}</p></div>
+          <div><b>Evaluation metric</b><p>{problem.evaluationMetric}</p></div>
           <div><b>Why it's hard</b><p>{b.hard}</p></div>
           <div><b>A nudge</b><p>{b.nudge}</p></div>
           <div><b>Real-world impact</b><p>{b.impact}</p></div>
         </div>
         {revealed && <p className="gd4-reveal">🔭 Peer Review: the ideal model family here is <b>{problem.bestFit.map(id => MODELS.find(m => m.id === id).name).join(" or ")}</b>.</p>}
-        <div className="gd4-targetRow">Target: beat <b>{problem.target} {problem.metricLabel}</b> on validation.</div>
+        <div className="gd4-targetRow">A held-out validation split is used. Target: beat <b>{problem.target} {problem.metricLabel}</b> on validation.</div>
         <button className="gd4-btn primary" onClick={onClose}>Close</button>
       </div>
     </div>
@@ -298,9 +309,13 @@ export function NotebookModal({ notebookUnlocked, onClose }) {
                 <h3>{p.title}</h3>
                 <p><b>The problem</b><br />{b.problem}</p>
                 <p><b>The data</b><br />{b.data}</p>
+                <p><b>Dataset size</b><br />{p.datasetSize}</p>
+                <p><b>Target variable</b><br />{p.targetVariable}</p>
+                <p><b>Evaluation metric</b><br />{p.evaluationMetric}</p>
                 <p><b>Why it's hard</b><br />{b.hard}</p>
                 <p><b>A nudge</b><br />{b.nudge}</p>
                 <p><b>Real-world impact</b><br />{b.impact}</p>
+                <p><b>Validation</b><br />A held-out validation split is used.</p>
               </>);
             })() : <div className="gd4-dim">Pick an unlocked page.</div>}
           </div>
