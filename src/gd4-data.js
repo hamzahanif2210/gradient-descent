@@ -249,10 +249,10 @@ function buildCategory(rng, pool, total, baseMin, weightFn) {
   return cards;
 }
 export const DECK_PLAN = [
-  ["model", MODELS, 16, 2, modelDemand],
+  ["model", MODELS, 16, 1, modelDemand],
   ["compute", COMPUTE, 12, 2, null],
   ["activation", ACTIVATIONS, 10, 2, null],
-  ["loss", LOSSES, 16, 2, lossDemand],
+  ["loss", LOSSES, 16, 1, lossDemand],
   ["helper", HELPERS, 16, 1, null],
 ];
 export function buildMainDeck(rng) {
